@@ -1,0 +1,3 @@
+C:/Users/admin/Desktop/AscendLang/build/CMakeFiles/Ascend.dir
+C:/Users/admin/Desktop/AscendLang/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/admin/Desktop/AscendLang/build/CMakeFiles/ZERO_CHECK.dir
