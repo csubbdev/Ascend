@@ -7,25 +7,34 @@
 
 class SymbolTable {
 public:
-    void addSymbol(const std::string &name);
-    bool hasSymbol(const std::string &name);
-    void printSymbols();
+    inline void addSymbol(const std::string &name, int value);
+    inline bool hasSymbol(const std::string &name) const;
+    inline int getValue(const std::string &name) const;
+    inline void printSymbols() const;
 
 private:
     std::unordered_map<std::string, int> symbols;
 };
 
-void SymbolTable::addSymbol(const std::string &name) {
-    symbols[name] = 0;  // For now, just store 0 as a placeholder for the symbol's value
+inline void SymbolTable::addSymbol(const std::string &name, int value) {
+    symbols[name] = value;
 }
 
-bool SymbolTable::hasSymbol(const std::string &name) {
+inline bool SymbolTable::hasSymbol(const std::string &name) const {
     return symbols.find(name) != symbols.end();
 }
 
-void SymbolTable::printSymbols() {
+inline int SymbolTable::getValue(const std::string &name) const {
+    auto it = symbols.find(name);
+    if (it != symbols.end()) {
+        return it->second;
+    }
+    throw std::runtime_error("Symbol not found: " + name);
+}
+
+inline void SymbolTable::printSymbols() const {
     for (const auto &entry : symbols) {
-        std::cout << entry.first << std::endl;
+        std::cout << entry.first << " = " << entry.second << std::endl;
     }
 }
 

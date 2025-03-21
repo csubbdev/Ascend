@@ -1,10 +1,8 @@
 #include <iostream>
 #include <string>
-#include <unordered_map>
-#include <cctype>
 #include <fstream>
 #include "include/lexer.hpp"
-#include "include/symboltable.hpp"
+#include "include/symbol_table.hpp"
 #include "include/parser.hpp"
 
 int main(int argc, char* argv[]) {

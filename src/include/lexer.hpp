@@ -2,8 +2,6 @@
 #define LEXER_HPP
 
 #include <string>
-#include <cctype>
-#include <iostream>
 
 // Token types
 enum class Token {
@@ -116,14 +114,12 @@ enum class Token {
     BITWISE_LEFT_SHIFT,
     BITWISE_RIGHT_SHIFT,
     EOF_TOKEN,
+    END_OF_FILE,
     END
 };
 
 // Convert token to its string representation for easier debugging
-std::string tokenToString(Token t);
-
-// Convert token to its string representation for easier debugging
-std::string tokenToString(Token t) {
+inline std::string tokenToString(Token t) {
     switch (t) {
         case Token::PRINT: return "PRINT";
         case Token::IF: return "IF";
@@ -146,69 +142,11 @@ public:
     Token getNextToken();
     char currentChar();
     void advance();
-
+    std::string getIdentifier();  // Added declaration for getIdentifier
+    int getNumber();
 private:
     std::string source;
     size_t index;
 };
-
-Lexer::Lexer(const std::string &src) : source(src), index(0) {}
-
-char Lexer::currentChar() {
-    return index < source.length() ? source[index] : '\0';
-}
-
-void Lexer::advance() {
-    index++;
-}
-
-Token Lexer::getNextToken() {
-    // Skip whitespaces
-    while (isspace(currentChar())) {
-        advance();
-    }
-
-    if (currentChar() == '\0') return Token::EOF_TOKEN;
-
-    char current = currentChar();
-
-    // Handle numbers
-    if (isdigit(current)) {
-        advance();
-        return Token::NUMBER;
-    }
-
-    // Handle assignment
-    if (current == '=') {
-        advance();
-        return Token::ASSIGN;
-    }
-
-    // Handle basic operators
-    if (current == '+') {
-        advance();
-        return Token::ADDITION;
-    }
-    if (current == '-') {
-        advance();
-        return Token::SUBTRACTION;
-    }
-    if (current == '*') {
-        advance();
-        return Token::MULTIPLICATION;
-    }
-    if (current == '/') {
-        advance();
-        return Token::DIVISION;
-    }
-
-    // Handle identifiers (variable names, etc.)
-    if (isalpha(current)) {
-        advance();
-        return Token::IDENTIFIER;
-    }
-
-    return Token::ERROR;  // Unknown token
-}
 
 #endif // LEXER_HPP

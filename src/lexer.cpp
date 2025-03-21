@@ -1,4 +1,6 @@
 #include "include/lexer.hpp"
+#include <cctype>
+#include <iostream>
 
 // Constructor: Initializes the lexer with the source code
 Lexer::Lexer(const std::string &src) : source(src), index(0) {}
@@ -83,12 +85,12 @@ Token Lexer::getNextToken() {
         return Token::TYPEDEF;
     }
 
-    // If an unknown token is encountered, return an error
+    // unknown token, return an error
     std::cerr << "Syntax error: unexpected token!" << std::endl;
     return Token::ERROR;
 }
 
-// Helper function to get the identifier string (collects alphanumeric characters)
+// get the identifier string (collects alphanumeric)
 std::string Lexer::getIdentifier() {
     std::string identifier;
     while (isalnum(currentChar())) {
@@ -98,7 +100,7 @@ std::string Lexer::getIdentifier() {
     return identifier;
 }
 
-// Helper function to get the number value (collects digits to form a number)
+// get the number value (collects digits to form a number)
 int Lexer::getNumber() {
     int number = 0;
     while (isdigit(currentChar())) {
