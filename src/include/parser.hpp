@@ -57,8 +57,7 @@ private:
         
         if (currentToken == Token::EQUALS) {
             consume();
-            // Here you would parse the right-hand side of the assignment
-            // For now, just expect a number
+            // TODO: ADD LOGIC 
             if (currentToken == Token::NUMBER) {
                 int value = lexer.getNumber();
                 symbolTable.addSymbol(identifier, value);

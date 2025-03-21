@@ -3,7 +3,7 @@
 
 #include <string>
 
-// Token types
+// token types
 enum class Token {
     PRINT,
     IF,
@@ -96,7 +96,7 @@ enum class Token {
     CONST,
     STRUCT,
     CLASS,
-    TYPEDEF, // for type declarations like int, float, etc.
+    TYPEDEF,
     ERROR,
     INVALID,
     ESCAPE_SEQUENCE,
@@ -118,7 +118,7 @@ enum class Token {
     END
 };
 
-// Convert token to its string representation for easier debugging
+// convert token to its string representation
 inline std::string tokenToString(Token t) {
     switch (t) {
         case Token::PRINT: return "PRINT";
@@ -135,14 +135,13 @@ inline std::string tokenToString(Token t) {
     }
 }
 
-// Lexer class definition
 class Lexer {
 public:
     Lexer(const std::string &src);
     Token getNextToken();
     char currentChar();
     void advance();
-    std::string getIdentifier();  // Added declaration for getIdentifier
+    std::string getIdentifier();
     int getNumber();
 private:
     std::string source;
