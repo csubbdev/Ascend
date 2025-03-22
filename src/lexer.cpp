@@ -2,11 +2,12 @@
 #include <cctype>
 #include <iostream>
 
-// constructor: initialize lexer with the source code
+// initialize lexer with the src
 Lexer::Lexer(const std::string &src) : source(src), index(0), lineNumber(1), lastNumber(0) {}
 
 char Lexer::currentChar() {
-    return index < source.length() ? source[index] : '\0';
+    char currentChar = index < source.length()? source[index] : '\0';
+    return currentChar;
 }
 
 char Lexer::peekChar() {
@@ -16,8 +17,10 @@ char Lexer::peekChar() {
 void Lexer::advance() {
     if (currentChar() == '\n') {
         lineNumber++;
+        index++;
+    } else {
+        index++;
     }
-    index++;
 }
 
 Token Lexer::getNextToken() {
@@ -26,7 +29,7 @@ Token Lexer::getNextToken() {
         advance();
     }
 
-    // End of file
+    // end of file
     if (currentChar() == '\0') {
         return Token::END;
     }
@@ -58,7 +61,8 @@ Token Lexer::getNextToken() {
             }
             advance();
         }
-        return getNextToken(); // recursively get next token after comment
+        // get next token after comment recursively
+        return getNextToken();
     }
 
     // := operator (assignment)
@@ -66,13 +70,6 @@ Token Lexer::getNextToken() {
         advance(); // skip ':'
         advance(); // skip '='
         return Token::ASSIGN;
-    }
-
-    // .. operator (range)
-    if (currentChar() == '.' && peekChar() == '.') {
-        advance(); // skip first '.'
-        advance(); // skip second '.'
-        return Token::DOTDOT;
     }
 
     // arithmetic operators
@@ -120,6 +117,24 @@ Token Lexer::getNextToken() {
         }
         return Token::MODULO;
     }
+    
+    if (currentChar() == '=') {
+        advance();
+        if (currentChar() == '=') {
+            advance();
+            return Token::EQUALS;
+        }
+        return Token::ASSIGN_SIMPLE;
+    }
+    
+    if (currentChar() == '<') {
+        advance();
+        if (currentChar() == '=') {
+            advance();
+            return Token::LESSER_THAN_OR_EQUAL;
+        }
+        return Token::LESSER_THAN;
+    }
 
     if (currentChar() == '>') {
         advance();
@@ -128,15 +143,6 @@ Token Lexer::getNextToken() {
             return Token::GREATER_THAN_OR_EQUAL;
         }
         return Token::GREATER_THAN;
-    }
-
-    if (currentChar() == '<') {
-        advance();
-        if (currentChar() == '=') {
-            advance();
-            return Token::MULTIPLY_ASSIGN;
-        }
-        return Token::MULTIPLY;
     }
 
     if (currentChar() == '&' && peekChar() == '&') {
@@ -186,6 +192,10 @@ Token Lexer::getNextToken() {
     if (currentChar() == ',') {
         advance();
         return Token::COMMA;
+    }
+    if (currentChar() == ';') {
+        advance();
+        return Token::SEMICOLON;
     }
 
     // numbers (digits)
@@ -239,9 +249,12 @@ Token Lexer::getNextToken() {
         if (identifier == "do") return Token::DO;
         if (identifier == "foreach") return Token::FOREACH;
         if (identifier == "case") return Token::CASE;
+        if (identifier == "func") return Token::FUNC;
         if (identifier == "return") return Token::RETURN;
-        
-        return Token::IDENTIFIER;
+        else {
+            lastIdentifier = identifier; // store the identifier
+            return Token::IDENTIFIER;
+        }
     }
 
     // unknown token
@@ -252,12 +265,7 @@ Token Lexer::getNextToken() {
 
 // get the identifier string (collects alphanumeric)
 std::string Lexer::getIdentifier() {
-    std::string identifier;
-    while (isalnum(currentChar()) || currentChar() == '_') {
-        identifier += currentChar();
-        advance();
-    }
-    return identifier;
+    return lastIdentifier;
 }
 
 // get the number value (collects digits to form a number)

@@ -41,6 +41,7 @@ enum class Token {
     IDENTIFIER,
     NUMBER,
     ASSIGN,
+    ASSIGN_SIMPLE,
     EQUALS,
     NOT_EQUALS,
     LESSER_THAN, 
@@ -106,6 +107,7 @@ enum class Token {
     STRUCT,
     CLASS,
     TYPEDEF,
+    SEMICOLON,
     INVALID,
     ESCAPE_SEQUENCE,
     FALSE,
@@ -119,12 +121,14 @@ enum class Token {
     EOF_TOKEN
 };
 
-// convert token to its string representation
+// convert token to string representation
 inline std::string tokenToString(Token t) {
     switch (t) {
         case Token::PRINT: return "PRINT";
+        case Token::SEMICOLON: return "SEMICOLON";
         case Token::IF: return "IF";
         case Token::IDENTIFIER: return "IDENTIFIER";
+        case Token::ASSIGN_SIMPLE: return "ASSIGN_SIMPLE";
         case Token::ASSIGN: return "ASSIGN";
         case Token::NUMBER: return "NUMBER";
         case Token::PLUS: return "PLUS";
@@ -145,8 +149,8 @@ inline std::string tokenToString(Token t) {
         case Token::AND: return "AND";
         case Token::OR: return "OR";
         case Token::NOT: return "NOT";
-        case Token::BREAK: return "BREAK";
-        case Token::CONTINUE: return "CONTINUE";
+        case Token::RETURN: return "RETURN";
+        case Token::FUNC: return "FUNC";
         case Token::END: return "END";
         default: return "UNKNOWN";
     }
@@ -163,6 +167,7 @@ public:
     std::string getIdentifier();
     int getNumber();
     std::string getString();
+    int lineNumber;
     int getLineNumber() { return lineNumber; }
     
     // add pos tracking methods
@@ -176,9 +181,9 @@ public:
 private:
     std::string source;
     size_t index;
-    int lineNumber;
     int lastNumber;
     std::string lastString;
+    std::string lastIdentifier;
 };
 
 #endif // LEXER_HPP
