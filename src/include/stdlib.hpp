@@ -4,6 +4,7 @@
 #include "value.hpp"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace ascend {
@@ -11,7 +12,7 @@ namespace ascend {
 class Interpreter;
 
 // Defines the builtin functions (print, len, range, push, ...) and constants
-// (PI, E) in the interpreter's global scope.
+// (PI, E, ...) in the interpreter's builtin scope.
 void registerStandardLibrary(Interpreter& interpreter);
 
 // The integers produced by range(start, stop, step).
@@ -28,6 +29,20 @@ struct RangeSpec {
 
 // Validates range() arguments: range(stop), range(start, stop) or range(start, stop, step).
 RangeSpec makeRange(const std::vector<Value>& args);
+
+// Formats one value with a format spec like ">8", ".2f" or "08x" (format.cpp).
+std::string formatValue(const Value& value, const std::string& spec);
+
+// format("{} is {:.1f}", args...): fills each {} with the next argument,
+// starting at args[first] (format.cpp).
+std::string formatTemplate(const std::string& tpl, const std::vector<Value>& args, size_t first);
+
+// JSON conversion (json.cpp).
+Value jsonParse(Interpreter& interpreter, const std::string& text);
+std::string jsonStringify(const Value& value, int indent);
+
+// Reads a whole file. Returns false if it can't be opened.
+bool readTextFile(const std::string& path, std::string& out);
 
 }  // namespace ascend
 

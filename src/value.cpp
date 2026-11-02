@@ -1,12 +1,15 @@
 #include "value.hpp"
 
 #include "environment.hpp"
+#include "numeric.hpp"
+#include "utf8.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 namespace ascend {
 
@@ -18,12 +21,27 @@ void checkNesting(int depth) {
     if (depth > kMaxNesting) throw RuntimeError("value is nested too deeply (is it cyclic?)");
 }
 
+double roundToF32(double value) {
+    if (std::isnan(value) || std::isinf(value)) return value;
+    if (std::fabs(value) > static_cast<double>(std::numeric_limits<float>::max())) {
+        return value > 0 ? std::numeric_limits<double>::infinity() : -std::numeric_limits<double>::infinity();
+    }
+    return static_cast<double>(static_cast<float>(value));
+}
+
 void write(std::string& out, const Value& value, bool repr, std::vector<const void*>& active) {
     switch (value.type()) {
         case Value::Type::Null: out += "null"; return;
         case Value::Type::Bool: out += value.asBool() ? "true" : "false"; return;
-        case Value::Type::Int: out += std::to_string(value.asInt()); return;
-        case Value::Type::Float: out += formatFloat(value.asFloat()); return;
+        case Value::Type::Int: out += intToString(value); return;
+        case Value::Type::Float: out += formatFloat(value.asFloat(), value.numKind() == NumKind::F32); return;
+        case Value::Type::Char:
+            if (repr) {
+                out += quoteChar(value.asChar());
+            } else {
+                appendUtf8(out, value.asChar());
+            }
+            return;
         case Value::Type::String:
             out += repr ? quoteString(value.asString()) : value.asString();
             return;
@@ -78,15 +96,21 @@ void write(std::string& out, const Value& value, bool repr, std::vector<const vo
     }
 }
 
+// Chars compare like the one-character strings that hold them.
+bool isText(const Value& v) { return v.isString() || v.isChar(); }
+
+std::string textOf(const Value& v) { return v.isChar() ? encodeUtf8(v.asChar()) : v.asString(); }
+
 bool equalAt(const Value& a, const Value& b, int depth) {
-    if (a.isNumber() && b.isNumber()) {
-        if (a.isInt() && b.isInt()) return a.asInt() == b.asInt();
-        return a.toDouble() == b.toDouble();
+    if (a.isNumber() && b.isNumber()) return numbersEqual(a, b);
+    if (a.type() != b.type()) {
+        if (isText(a) && isText(b)) return textOf(a) == textOf(b);
+        return false;
     }
-    if (a.type() != b.type()) return false;
     switch (a.type()) {
         case Value::Type::Null: return true;
         case Value::Type::Bool: return a.asBool() == b.asBool();
+        case Value::Type::Char: return a.asChar() == b.asChar();
         case Value::Type::String: return a.asString() == b.asString();
         case Value::Type::List: {
             if (a.listPtr() == b.listPtr()) return true;
@@ -117,20 +141,11 @@ bool equalAt(const Value& a, const Value& b, int depth) {
 }
 
 int compareAt(const Value& a, const Value& b, int depth) {
-    if (a.isInt() && b.isInt()) {
-        return a.asInt() < b.asInt() ? -1 : (a.asInt() > b.asInt() ? 1 : 0);
-    }
-    if (a.isNumber() && b.isNumber()) {
-        double x = a.toDouble();
-        double y = b.toDouble();
-        // NaN sorts before every other number so sorting stays well defined.
-        bool xNan = std::isnan(x);
-        bool yNan = std::isnan(y);
-        if (xNan || yNan) return xNan == yNan ? 0 : (xNan ? -1 : 1);
-        return x < y ? -1 : (x > y ? 1 : 0);
-    }
-    if (a.isString() && b.isString()) {
-        int result = a.asString().compare(b.asString());
+    if (a.isNumber() && b.isNumber()) return compareNumbers(a, b);
+    if (a.isChar() && b.isChar()) return a.asChar() < b.asChar() ? -1 : (a.asChar() > b.asChar() ? 1 : 0);
+    if (isText(a) && isText(b)) {
+        // UTF-8 byte order is the same as code point order.
+        int result = textOf(a).compare(textOf(b));
         return result < 0 ? -1 : (result > 0 ? 1 : 0);
     }
     if (a.isList() && b.isList()) {
@@ -146,6 +161,27 @@ int compareAt(const Value& a, const Value& b, int depth) {
     throw RuntimeError(std::string("can't compare ") + a.typeName() + " with " + b.typeName());
 }
 
+void appendEscaped(std::string& out, char c, char quote) {
+    switch (c) {
+        case '\\': out += "\\\\"; return;
+        case '\n': out += "\\n"; return;
+        case '\t': out += "\\t"; return;
+        case '\r': out += "\\r"; return;
+        case '\0': out += "\\0"; return;
+        default: break;
+    }
+    if (c == quote) {
+        out += '\\';
+        out += c;
+    } else if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f) {
+        char buffer[8];
+        std::snprintf(buffer, sizeof buffer, "\\x%02x", static_cast<unsigned char>(c));
+        out += buffer;
+    } else {
+        out += c;
+    }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -157,40 +193,58 @@ Value Value::fromBool(bool value) {
     return v;
 }
 
-Value Value::fromInt(int64_t value) {
+Value Value::fromInt(int64_t value, NumKind kind) {
     Value v;
-    v.data_.emplace<2>(value);
+    v.data_.emplace<2>(IntData{value, kind});
     return v;
 }
 
-Value Value::fromFloat(double value) {
+Value Value::fromUInt(uint64_t value, NumKind kind) {
     Value v;
-    v.data_.emplace<3>(value);
+    v.data_.emplace<2>(IntData{static_cast<int64_t>(value), kind});
+    return v;
+}
+
+Value Value::fromFloat(double value, NumKind kind) {
+    Value v;
+    v.data_.emplace<3>(FloatData{kind == NumKind::F32 ? roundToF32(value) : value, kind});
+    return v;
+}
+
+Value Value::fromChar(char32_t value) {
+    Value v;
+    v.data_.emplace<4>(value);
     return v;
 }
 
 Value Value::fromString(std::string value) {
     Value v;
-    v.data_.emplace<4>(std::move(value));
+    v.data_.emplace<5>(std::move(value));
     return v;
 }
 
 Value Value::fromList(std::shared_ptr<ListObj> value) {
     Value v;
-    v.data_.emplace<5>(std::move(value));
+    v.data_.emplace<6>(std::move(value));
     return v;
 }
 
 Value Value::fromMap(std::shared_ptr<MapObj> value) {
     Value v;
-    v.data_.emplace<6>(std::move(value));
+    v.data_.emplace<7>(std::move(value));
     return v;
 }
 
 Value Value::fromFunction(std::shared_ptr<Callable> value) {
     Value v;
-    v.data_.emplace<7>(std::move(value));
+    v.data_.emplace<8>(std::move(value));
     return v;
+}
+
+double Value::toDouble() const {
+    if (isFloat()) return asFloat();
+    if (numKind() == NumKind::U64) return static_cast<double>(asUInt());
+    return static_cast<double>(asInt());
 }
 
 bool Value::truthy() const {
@@ -199,6 +253,7 @@ bool Value::truthy() const {
         case Type::Bool: return asBool();
         case Type::Int: return asInt() != 0;
         case Type::Float: return asFloat() != 0.0;
+        case Type::Char: return asChar() != 0;
         case Type::String: return !asString().empty();
         case Type::List: return !asList().items.empty();
         case Type::Map: return asMap().size() != 0;
@@ -211,12 +266,13 @@ const char* Value::typeName() const {
     switch (type()) {
         case Type::Null: return "null";
         case Type::Bool: return "bool";
-        case Type::Int: return "int";
-        case Type::Float: return "float";
+        case Type::Int:
+        case Type::Float: return numKindName(numKind());
+        case Type::Char: return "char";
         case Type::String: return "string";
         case Type::List: return "list";
         case Type::Map: return "map";
-        case Type::Function: return "function";
+        case Type::Function: return "func";
     }
     return "unknown";
 }
@@ -243,19 +299,29 @@ bool MapObj::hashKey(const Value& key, std::string& out) {
     switch (key.type()) {
         case Value::Type::Null: out = "n"; return true;
         case Value::Type::Bool: out = key.asBool() ? "b1" : "b0"; return true;
-        case Value::Type::Int: out = "i" + std::to_string(key.asInt()); return true;
+        case Value::Type::Int: out = "i" + intToString(key); return true;
         case Value::Type::Float: {
             double d = key.asFloat();
-            if (std::isfinite(d) && d == std::floor(d) && d >= -9223372036854775808.0 &&
-                d < 9223372036854775808.0) {
-                out = "i" + std::to_string(static_cast<int64_t>(d));  // 1.0 is the same key as 1
-                return true;
+            if (std::isfinite(d) && d == std::floor(d)) {
+                // Integral floats are the same key as the equal int: m[1.0] is m[1].
+                if (d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
+                    out = "i" + std::to_string(static_cast<int64_t>(d));
+                    return true;
+                }
+                if (d >= 0 && d < 18446744073709551616.0) {
+                    out = "i" + std::to_string(static_cast<uint64_t>(d));
+                    return true;
+                }
             }
             uint64_t bits;
             std::memcpy(&bits, &d, sizeof bits);
             out = "f" + std::to_string(bits);
             return true;
         }
+        case Value::Type::Char:
+            out = "s";
+            appendUtf8(out, key.asChar());
+            return true;
         case Value::Type::String:
             out.reserve(key.asString().size() + 1);
             out = "s";
@@ -279,8 +345,8 @@ Value* MapObj::find(const Value& key) {
 void MapObj::set(const Value& key, Value value) {
     std::string hashed;
     if (!hashKey(key, hashed)) {
-        throw RuntimeError(std::string("a ") + key.typeName() +
-                           " can't be used as a map key (use a string, number, bool or null)");
+        throw RuntimeError(aTypeName(key) +
+                           " can't be used as a map key (use a string, number, char, bool or null)");
     }
     auto it = index_.find(hashed);
     if (it != index_.end()) {
@@ -325,14 +391,16 @@ void FunctionObj::forEachChild(const std::function<void(GcObject*)>& visit) cons
 // ---------------------------------------------------------------------------
 // Formatting and comparison
 
-std::string formatFloat(double value) {
+std::string formatFloat(double value, bool singlePrecision) {
     if (std::isnan(value)) return "nan";
     if (std::isinf(value)) return value > 0 ? "inf" : "-inf";
     // Use the shortest representation that reads back as the same number.
     char buffer[32];
-    for (int precision = 1; precision <= 17; ++precision) {
+    const int maxPrecision = singlePrecision ? 9 : 17;
+    for (int precision = 1; precision <= maxPrecision; ++precision) {
         std::snprintf(buffer, sizeof buffer, "%.*g", precision, value);
-        if (std::strtod(buffer, nullptr) == value) break;
+        double parsed = std::strtod(buffer, nullptr);
+        if ((singlePrecision ? roundToF32(parsed) : parsed) == value) break;
     }
     std::string text = buffer;
     if (text.find_first_of(".eE") == std::string::npos) text += ".0";  // keep floats looking like floats
@@ -341,26 +409,28 @@ std::string formatFloat(double value) {
 
 std::string quoteString(const std::string& text) {
     std::string out = "\"";
-    for (char c : text) {
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\t': out += "\\t"; break;
-            case '\r': out += "\\r"; break;
-            case '\0': out += "\\0"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f) {
-                    char buffer[8];
-                    std::snprintf(buffer, sizeof buffer, "\\x%02x", static_cast<unsigned char>(c));
-                    out += buffer;
-                } else {
-                    out += c;
-                }
-        }
-    }
+    for (char c : text) appendEscaped(out, c, '"');
     out += '"';
     return out;
+}
+
+std::string quoteChar(char32_t c) {
+    std::string out = "'";
+    if (c < 0x80) {
+        appendEscaped(out, static_cast<char>(c), '\'');
+    } else {
+        appendUtf8(out, c);
+    }
+    out += '\'';
+    return out;
+}
+
+std::string aTypeName(const Value& value) {
+    std::string name = value.typeName();
+    if (value.isNull()) return "null";
+    bool vowelSound = name[0] == 'a' || name[0] == 'e' || name[0] == 'i' || name[0] == 'o' ||
+                      (name[0] == 'f' && name.size() > 1 && name[1] >= '0' && name[1] <= '9');  // "an f32"
+    return (vowelSound ? "an " : "a ") + name;
 }
 
 std::string functionName(const Callable& callable) {
@@ -384,12 +454,13 @@ std::string toRepr(const Value& value) {
 }
 
 size_t resolveIndex(const Value& index, size_t length, const char* what) {
-    if (!index.isInt()) throw RuntimeError(std::string(what) + " index must be an int, not " + index.typeName());
+    if (!index.isInt()) throw RuntimeError(std::string(what) + " index must be an integer, not " + aTypeName(index));
     const int64_t size = static_cast<int64_t>(length);
-    int64_t i = index.asInt();
-    if (i < 0) i += size;
-    if (i < 0 || i >= size) {
-        throw RuntimeError(std::string(what) + " index " + std::to_string(index.asInt()) + " is out of range (length " +
+    int64_t i = 0;
+    bool valid = toInt64(index, i);
+    if (valid && i < 0) i += size;
+    if (!valid || i < 0 || i >= size) {
+        throw RuntimeError(std::string(what) + " index " + toString(index) + " is out of range (length " +
                            std::to_string(length) + ")");
     }
     return static_cast<size_t>(i);

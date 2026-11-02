@@ -16,6 +16,11 @@ bool isAssignmentOperator(TokenType type) {
         case TokenType::StarEqual:
         case TokenType::SlashEqual:
         case TokenType::PercentEqual:
+        case TokenType::AmpersandEqual:
+        case TokenType::PipeEqual:
+        case TokenType::CaretEqual:
+        case TokenType::ShiftLeftEqual:
+        case TokenType::ShiftRightEqual:
             return true;
         default:
             return false;
@@ -34,11 +39,13 @@ std::unique_ptr<T> nodeAt(const Token& token) {
 }  // namespace
 
 // Limits how deeply blocks and expressions may nest, so pathological input
-// produces an error instead of overflowing the stack.
+// produces an error instead of overflowing the stack. Both the nesting depth
+// and the real stack use are checked, since stack frames differ in size
+// between compilers.
 class Parser::NestingGuard {
 public:
     NestingGuard(Parser& parser, const Token& at) : parser_(parser) {
-        if (parser_.depth_ >= kMaxNesting) parser_.error(at, "code is nested too deeply");
+        if (parser_.depth_ >= kMaxNesting || parser_.stack_.exceeded()) parser_.error(at, "code is nested too deeply");
         ++parser_.depth_;
     }
     ~NestingGuard() { --parser_.depth_; }
@@ -76,16 +83,21 @@ std::unique_ptr<Program> Parser::parseProgram() {
     return program;
 }
 
+// Records facts about a block's statements that the interpreter relies on.
+void Parser::noteStatement(Block& block, const Stmt& stmt) {
+    if (stmt.kind == StmtKind::Declare) block.declaresNames = true;
+    if (stmt.kind == StmtKind::Function) {
+        block.declaresNames = true;
+        block.hasFunctions = true;
+    }
+}
+
 // Parses one statement into `block`, recovering from syntax errors.
 void Parser::parseStatementInto(Block& block) {
     size_t start = current_;
     try {
         StmtPtr stmt = statement();
-        if (stmt->kind == StmtKind::Declare) block.declaresNames = true;
-        if (stmt->kind == StmtKind::Function) {
-            block.declaresNames = true;
-            block.hasFunctions = true;
-        }
+        noteStatement(block, *stmt);
         block.statements.push_back(std::move(stmt));
     } catch (const ParseError&) {
         synchronize();
@@ -105,6 +117,26 @@ StmtPtr Parser::statement() {
         case TokenType::Return: advance(); return returnStatement(token);
         case TokenType::Try: advance(); return tryStatement(token);
         case TokenType::Throw: advance(); return throwStatement(token);
+        case TokenType::Const: advance(); return constDeclaration(token);
+        case TokenType::Match: advance(); return matchStatement(token);
+        case TokenType::Identifier: {
+            // C-style declarations: `u8 age = 30` and functions `i32 add(i32 a, i32 b) { }`.
+            size_t length = typeLength(0);
+            if (length > 0 && peek(length).type == TokenType::Identifier) {
+                if (peek(length + 1).type == TokenType::LeftParen) return typedFunctionDeclaration();
+                return typedDeclaration();
+            }
+            if (peek(1).type == TokenType::Colon) {
+                // The other common style, `age: u8 = 30`: suggest the C-style form.
+                std::string type = typeLength(2) > 0 ? peek(2).lexeme : "i32";
+                error(token, "write the type before the name, like '" + type + " " + token.lexeme + " = ...'");
+            }
+            if (length == 0 && peek(1).type == TokenType::Identifier) {
+                TypeSpec unused;
+                if (!lookupType(token.lexeme, unused)) error(token, unknownTypeMessage(token.lexeme));
+            }
+            break;
+        }
         case TokenType::Break: {
             advance();
             auto stmt = nodeAt<BreakStmt>(token);
@@ -117,12 +149,22 @@ StmtPtr Parser::statement() {
             expectStatementEnd();
             return stmt;
         }
-        case TokenType::Func:
+        case TokenType::Func: {
+            // `func name(...)` declares a function; `func callback = ...` and
+            // `func? callback` declare a variable that holds one.
+            TokenType afterName = peek(2).type;
+            bool variable = peek(1).type == TokenType::Question ||
+                            (peek(1).type == TokenType::Identifier &&
+                             (afterName == TokenType::Equal || afterName == TokenType::Newline ||
+                              afterName == TokenType::Semicolon || afterName == TokenType::Eof ||
+                              afterName == TokenType::RightBrace));
+            if (variable) return typedDeclaration();
             if (peek(1).type == TokenType::Identifier) {
                 advance();
                 return functionDeclaration(token);
             }
             break;  // an anonymous function used as an expression
+        }
         case TokenType::LeftBrace: {
             auto stmt = nodeAt<BlockStmt>(token);
             stmt->body = block("block");
@@ -251,6 +293,150 @@ StmtPtr Parser::throwStatement(const Token& keyword) {
     return stmt;
 }
 
+// How many tokens the type name starting `offset` tokens ahead takes up
+// (1 for `u8`, 2 for `string?`), or 0 if there is no type name there.
+size_t Parser::typeLength(size_t offset) const {
+    const Token& token = peek(offset);
+    TypeSpec type;
+    bool isType = token.type == TokenType::Func || (token.type == TokenType::Identifier && lookupType(token.lexeme, type));
+    if (!isType) return 0;
+    return peek(offset + 1).type == TokenType::Question ? 2 : 1;
+}
+
+std::string Parser::unknownTypeMessage(const std::string& name) {
+    return "unknown type '" + name +
+           "' (the types are: i8 i16 i32 i64 u8 u16 u32 u64 int byte f32 f64 float bool char string list map "
+           "func any)";
+}
+
+// type name = value   or   type name   (which starts at the type's zero value)
+StmtPtr Parser::typedDeclaration() {
+    const Token& start = peek();
+    auto stmt = nodeAt<DeclareStmt>(start);
+    stmt->type = parseType(false);
+    stmt->hasType = true;
+    const Token& name = consume(TokenType::Identifier, "a variable name after the type");
+    stmt->name = name.lexeme;
+    if (check(TokenType::Declare)) {
+        error(peek(), "use '=' in a typed declaration, like '" + stmt->type.name() + " " + name.lexeme + " = ...'");
+    }
+    if (match(TokenType::Equal)) {
+        skipNewlines();
+        stmt->value = expression();
+    }
+    expectStatementEnd();
+    return stmt;
+}
+
+// A function with its return type in front, C style: `i32 add(i32 a, i32 b) { ... }`
+StmtPtr Parser::typedFunctionDeclaration() {
+    const Token& start = peek();
+    TypeSpec returnType = parseType(true);
+    const Token& name = advance();
+    auto stmt = nodeAt<FunctionStmt>(start);
+    stmt->function = functionRest(name, name.lexeme, &returnType);
+    return stmt;
+}
+
+// const NAME = value   or   const type NAME = value
+StmtPtr Parser::constDeclaration(const Token& keyword) {
+    auto stmt = nodeAt<DeclareStmt>(keyword);
+    stmt->constant = true;
+    size_t length = typeLength(0);
+    if (length > 0 && peek(length).type == TokenType::Identifier) {
+        stmt->type = parseType(false);
+        stmt->hasType = true;
+    }
+    const Token& name = consume(TokenType::Identifier, "a name after 'const'");
+    stmt->name = name.lexeme;
+    if (check(TokenType::Colon)) {
+        std::string type = typeLength(1) > 0 ? peek(1).lexeme : "i32";
+        error(peek(), "write the type before the name, like 'const " + type + " " + name.lexeme + " = ...'");
+    }
+    if (!match(TokenType::Equal) && !match(TokenType::Declare)) {
+        error(peek(), "a constant needs a value: 'const " + name.lexeme + " = ...'");
+    }
+    skipNewlines();
+    stmt->value = expression();
+    expectStatementEnd();
+    return stmt;
+}
+
+// match value {
+//     1, 2 => print("small")
+//     else => { print("other") }
+// }
+StmtPtr Parser::matchStatement(const Token& keyword) {
+    auto stmt = nodeAt<MatchStmt>(keyword);
+    stmt->subject = condition("match");
+    skipNewlines();
+    const Token& open = consume(TokenType::LeftBrace, "'{' to start the match arms");
+    NestingGuard guard(*this, open);
+    bool sawDefault = false;
+    while (true) {
+        skipSeparators();
+        if (check(TokenType::RightBrace) || isAtEnd()) break;
+        size_t start = current_;
+        try {
+            MatchArm arm;
+            bool isDefault = check(TokenType::Else) ||
+                             (check(TokenType::Identifier) && peek().lexeme == "_" && peek(1).type == TokenType::FatArrow);
+            if (isDefault) {
+                const Token& defaultToken = advance();
+                if (sawDefault) error(defaultToken, "a match can only have one default ('else') arm");
+                sawDefault = true;
+            } else {
+                do {
+                    arm.patterns.push_back(expression());
+                } while (match(TokenType::Comma));
+            }
+            consume(TokenType::FatArrow, "'=>' after the match pattern");
+            skipNewlines();
+            if (check(TokenType::LeftBrace)) {
+                arm.body = block("match arm");
+            } else {
+                StmtPtr body = statement();
+                noteStatement(arm.body, *body);
+                arm.body.statements.push_back(std::move(body));
+            }
+            stmt->arms.push_back(std::move(arm));
+        } catch (const ParseError&) {
+            synchronize();
+            if (current_ == start && !isAtEnd()) advance();
+        }
+    }
+    if (!check(TokenType::RightBrace)) {
+        error(peek(), "expected '}' to close the match that starts on line " + std::to_string(open.line) +
+                          ", found " + describeToken(peek()));
+    }
+    advance();
+    return stmt;
+}
+
+// A type name like `i32`, `string` or `u8?` (the ? allows null).
+TypeSpec Parser::parseType(bool allowVoid) {
+    const Token& token = peek();
+    std::string name;
+    if (token.type == TokenType::Identifier) {
+        name = token.lexeme;
+    } else if (token.type == TokenType::Func) {
+        name = "func";
+    } else {
+        error(token, "expected a type name (like i32, f64, string or bool), found " + describeToken(token));
+    }
+    TypeSpec type;
+    if (!lookupType(name, type)) error(token, unknownTypeMessage(name));
+    if (type.kind == TypeKind::Void && !allowVoid) error(token, "'void' can only be used as a return type");
+    advance();
+    if (match(TokenType::Question)) {
+        if (type.kind == TypeKind::Any || type.kind == TypeKind::Void) {
+            error(previous(), "'" + name + "' can't be made nullable with '?'");
+        }
+        type.nullable = true;
+    }
+    return type;
+}
+
 StmtPtr Parser::functionDeclaration(const Token& keyword) {
     const Token& name = advance();
     auto stmt = nodeAt<FunctionStmt>(keyword);
@@ -258,15 +444,25 @@ StmtPtr Parser::functionDeclaration(const Token& keyword) {
     return stmt;
 }
 
-std::unique_ptr<FunctionExpr> Parser::functionRest(const Token& keyword, const std::string& name) {
+// Parameters, optional `-> type` and the body of a function. A typed
+// parameter is written C style: `i32 count`.
+std::unique_ptr<FunctionExpr> Parser::functionRest(const Token& keyword, const std::string& name,
+                                                   const TypeSpec* returnType) {
     auto function = nodeAt<FunctionExpr>(keyword);
     function->name = name;
+    if (returnType != nullptr) function->returnType = *returnType;
     consume(TokenType::LeftParen, name.empty() ? "'(' after 'func'" : "'(' after the function name");
     bool sawDefault = false;
     while (!check(TokenType::RightParen)) {
-        const Token& param = consume(TokenType::Identifier, "a parameter name");
         Param parameter;
+        size_t length = typeLength(0);
+        if (length > 0 && peek(length).type == TokenType::Identifier) parameter.type = parseType(false);
+        const Token& param = consume(TokenType::Identifier, "a parameter name");
         parameter.name = param.lexeme;
+        if (check(TokenType::Colon)) {
+            std::string type = typeLength(1) > 0 ? peek(1).lexeme : "i32";
+            error(peek(), "write the parameter's type before its name, like '" + type + " " + param.lexeme + "'");
+        }
         if (match(TokenType::Equal)) {
             parameter.defaultValue = expression();
             sawDefault = true;
@@ -279,6 +475,11 @@ std::unique_ptr<FunctionExpr> Parser::functionRest(const Token& keyword, const s
         if (!match(TokenType::Comma)) break;
     }
     consume(TokenType::RightParen, "')' after the parameters");
+    if (check(TokenType::Arrow)) {
+        if (returnType != nullptr) error(peek(), "the return type is already written before the function name");
+        advance();
+        function->returnType = parseType(true);
+    }
     function->body = block("function body");
     return function;
 }
@@ -348,6 +549,8 @@ void Parser::synchronize() {
             case TokenType::Throw:
             case TokenType::Break:
             case TokenType::Continue:
+            case TokenType::Const:
+            case TokenType::Match:
                 return;
             default:
                 advance();
@@ -371,6 +574,9 @@ ExprPtr Parser::ternary() {
     skipNewlines();
     expr->thenExpr = expression();
     skipNewlines();
+    if (check(TokenType::FormatSpec)) {
+        error(peek(), "in an f-string, put a conditional expression in parentheses: {(a ? b : c)}");
+    }
     consume(TokenType::Colon, "':' in the conditional expression");
     skipNewlines();
     expr->elseExpr = ternary();
@@ -437,9 +643,19 @@ ExprPtr Parser::equality() {
 }
 
 ExprPtr Parser::comparison() {
-    return binary(&Parser::additive, {TokenType::Less, TokenType::LessEqual, TokenType::Greater,
-                                      TokenType::GreaterEqual, TokenType::In});
+    return binary(&Parser::bitOr, {TokenType::Less, TokenType::LessEqual, TokenType::Greater,
+                                   TokenType::GreaterEqual, TokenType::In});
 }
+
+// Bitwise operators bind tighter than comparisons (unlike C), so
+// `flags & 1 == 0` means `(flags & 1) == 0`.
+ExprPtr Parser::bitOr() { return binary(&Parser::bitXor, {TokenType::Pipe}); }
+
+ExprPtr Parser::bitXor() { return binary(&Parser::bitAnd, {TokenType::Caret}); }
+
+ExprPtr Parser::bitAnd() { return binary(&Parser::shift, {TokenType::Ampersand}); }
+
+ExprPtr Parser::shift() { return binary(&Parser::additive, {TokenType::ShiftLeft, TokenType::ShiftRight}); }
 
 ExprPtr Parser::additive() { return binary(&Parser::multiplicative, {TokenType::Plus, TokenType::Minus}); }
 
@@ -448,7 +664,22 @@ ExprPtr Parser::multiplicative() {
 }
 
 ExprPtr Parser::unary() {
-    if (check(TokenType::Minus) || check(TokenType::Not)) {
+    // A minus directly before a number literal is part of the literal, so
+    // `-128i8` works even though 128 alone doesn't fit in an i8. Not when the
+    // number is used further: -2 ** 2 is -(2 ** 2).
+    if (check(TokenType::Minus) && (peek(1).type == TokenType::Int || peek(1).type == TokenType::Float)) {
+        TokenType after = peek(2).type;
+        if (after != TokenType::StarStar && after != TokenType::Dot && after != TokenType::LeftParen &&
+            after != TokenType::LeftBracket) {
+            const Token& minus = advance();
+            const Token& number = advance();
+            ExprPtr literal = numberLiteral(number, true);
+            auto expr = nodeAt<LiteralExpr>(minus);
+            expr->value = literal->as<LiteralExpr>().value;
+            return expr;
+        }
+    }
+    if (check(TokenType::Minus) || check(TokenType::Not) || check(TokenType::Tilde)) {
         const Token& op = advance();
         NestingGuard guard(*this, op);
         auto expr = nodeAt<UnaryExpr>(op);
@@ -530,18 +761,19 @@ ExprPtr Parser::finishIndex(ExprPtr object, const Token& bracket) {
 ExprPtr Parser::primary() {
     const Token& token = peek();
     switch (token.type) {
-        case TokenType::Int: {
+        case TokenType::Int:
+        case TokenType::Float:
+            advance();
+            return numberLiteral(token, false);
+        case TokenType::Char: {
             advance();
             auto literal = nodeAt<LiteralExpr>(token);
-            literal->value = Value::fromInt(token.intValue);
+            literal->value = Value::fromChar(token.charValue);
             return literal;
         }
-        case TokenType::Float: {
+        case TokenType::FStringStart:
             advance();
-            auto literal = nodeAt<LiteralExpr>(token);
-            literal->value = Value::fromFloat(token.floatValue);
-            return literal;
-        }
+            return fString(token);
         case TokenType::String: {
             advance();
             auto literal = nodeAt<LiteralExpr>(token);
@@ -625,6 +857,64 @@ ExprPtr Parser::mapLiteral(const Token& brace) {
     }
     consume(TokenType::RightBrace, "'}' to close the map that starts on line " + std::to_string(brace.line));
     return map;
+}
+
+// Builds a number literal, checking that it fits its type.
+ExprPtr Parser::numberLiteral(const Token& token, bool negate) {
+    auto literal = nodeAt<LiteralExpr>(token);
+    std::string text = (negate ? "-" : "") + token.lexeme;
+    if (token.type == TokenType::Float) {
+        literal->value = Value::fromFloat(negate ? -token.floatValue : token.floatValue, token.numKind);
+        return literal;
+    }
+
+    const NumKind kind = token.numKind;
+    const uint64_t magnitude = token.intValue;
+    if (isUnsignedKind(kind)) {
+        if (negate && magnitude != 0) error(token, text + " is negative, but " + numKindName(kind) + " is unsigned");
+        if (magnitude > unsignedMax(kind)) {
+            error(token, text + " doesn't fit in " + numKindName(kind) + " (" + rangeText(kind) + ")");
+        }
+        literal->value = Value::fromUInt(magnitude, kind);
+        return literal;
+    }
+
+    const uint64_t limit = negate ? static_cast<uint64_t>(signedMax(kind)) + 1 : static_cast<uint64_t>(signedMax(kind));
+    if (magnitude > limit) {
+        if (kind == NumKind::Int) {
+            error(token, text + " is too large for int (" + rangeText(kind) + ")" +
+                             (negate ? "" : "; add a suffix to use another type, like " + token.lexeme + "u64"));
+        }
+        error(token, text + " doesn't fit in " + numKindName(kind) + " (" + rangeText(kind) + ")");
+    }
+    int64_t value = negate ? static_cast<int64_t>(0 - magnitude) : static_cast<int64_t>(magnitude);
+    literal->value = Value::fromInt(value, kind);
+    return literal;
+}
+
+// f"Hello, {name}!" was lexed into its literal text and interpolations.
+ExprPtr Parser::fString(const Token& start) {
+    auto expr = nodeAt<FStringExpr>(start);
+    while (!check(TokenType::FStringEnd)) {
+        if (check(TokenType::String)) {
+            FStringPart part;
+            part.text = advance().text;
+            expr->parts.push_back(std::move(part));
+            continue;
+        }
+        consume(TokenType::InterpStart, "'{' or the end of the f-string");
+        FStringPart part;
+        part.expr = expression();
+        if (check(TokenType::FormatSpec)) part.spec = advance().text;
+        if (!check(TokenType::InterpEnd)) {
+            error(peek(), "expected '}' after the expression in the f-string, found " + describeToken(peek()) +
+                              " (put a conditional expression in parentheses)");
+        }
+        advance();
+        expr->parts.push_back(std::move(part));
+    }
+    advance();  // FStringEnd
+    return expr;
 }
 
 // ---------------------------------------------------------------------------

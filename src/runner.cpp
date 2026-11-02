@@ -10,12 +10,27 @@
 
 namespace ascend {
 
+void prepareSource(std::string& text) {
+    if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);  // UTF-8 byte order mark
+    if (text.compare(0, 2, "#!") == 0) text.replace(0, 2, "//");     // allow #!/usr/bin/env ascend
+}
+
 RunResult runSource(Interpreter& interpreter, const std::string& source, const RunOptions& options,
                     std::ostream& err) {
     auto report = [&](const std::vector<Diagnostic>& diagnostics, const char* kind) {
         interpreter.out().flush();  // keep program output and errors in order
         for (const auto& d : diagnostics) {
             err << formatDiagnostic(source, options.filename, d.line, d.column, kind, d.message);
+        }
+        err.flush();
+    };
+    // Runtime errors may come from an imported file.
+    auto reportAt = [&](const SourceFile* file, int line, int column, const std::string& message) {
+        interpreter.out().flush();
+        if (file != nullptr) {
+            err << formatDiagnostic(file->text, file->name, line, column, "runtime error", message);
+        } else {
+            err << formatDiagnostic(source, options.filename, line, column, "runtime error", message);
         }
         err.flush();
     };
@@ -44,20 +59,24 @@ RunResult runSource(Interpreter& interpreter, const std::string& source, const R
         report(problems, "error");
         return {RunStatus::SyntaxError, kExitSyntaxError};
     }
+    if (options.checkOnly) return {RunStatus::Ok, 0};
 
+    auto file = std::make_unique<SourceFile>();
+    file->name = options.filename;
+    file->text = source;
     try {
-        interpreter.execute(std::move(program));
+        interpreter.execute(std::move(program), std::move(file));
     } catch (const RuntimeError& error) {
-        report({{error.line, error.column, error.what()}}, "runtime error");
+        reportAt(error.source, error.line, error.column, error.what());
         return {RunStatus::RuntimeError, kExitRuntimeError};
     } catch (const ThrownValue& thrown) {
-        report({{thrown.line, thrown.column, "uncaught error: " + toString(thrown.value)}}, "runtime error");
+        reportAt(thrown.source, thrown.line, thrown.column, "uncaught error: " + toString(thrown.value));
         return {RunStatus::RuntimeError, kExitRuntimeError};
     } catch (const ExitRequest& exit) {
         interpreter.out().flush();
         return {RunStatus::Exited, exit.code};
     } catch (const std::bad_alloc&) {
-        report({{0, 0, "out of memory"}}, "runtime error");
+        reportAt(nullptr, 0, 0, "out of memory");
         return {RunStatus::RuntimeError, kExitRuntimeError};
     }
 

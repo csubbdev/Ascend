@@ -8,7 +8,7 @@
 
 namespace ascend {
 
-constexpr const char* kVersion = "0.2.0";
+constexpr const char* kVersion = "0.3.0";
 
 // Process exit codes (following the BSD sysexits convention).
 constexpr int kExitSyntaxError = 65;
@@ -25,6 +25,7 @@ enum class RunStatus {
 struct RunOptions {
     std::string filename = "<input>";  // shown in error messages
     bool repl = false;
+    bool checkOnly = false;  // only check for errors; don't run the program
 };
 
 struct RunResult {
@@ -35,6 +36,10 @@ struct RunResult {
 // Lexes, parses, checks and runs `source`, printing any errors to `err`.
 RunResult runSource(Interpreter& interpreter, const std::string& source, const RunOptions& options,
                     std::ostream& err);
+
+// Prepares a file's text for running: drops a UTF-8 byte order mark and
+// turns a first line starting with #! into a comment.
+void prepareSource(std::string& text);
 
 }  // namespace ascend
 

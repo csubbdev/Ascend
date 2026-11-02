@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(ascend VERSION 0.2.0 LANGUAGES CXX)
+project(ascend VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,15 +10,27 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# The sources and tests contain UTF-8 text; MSVC otherwise assumes the system code page.
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 # Everything except main() lives in a library so the tests can use it too.
 add_library(ascend_core STATIC
     src/error.cpp
+    src/types.cpp
+    src/utf8.cpp
+    src/numeric.cpp
+    src/typecheck.cpp
+    src/stack_limit.cpp
     src/lexer.cpp
     src/parser.cpp
     src/semantic_analyzer.cpp
     src/value.cpp
     src/interpreter.cpp
     src/stdlib.cpp
+    src/format.cpp
+    src/json.cpp
     src/runner.cpp
     src/repl.cpp
 )

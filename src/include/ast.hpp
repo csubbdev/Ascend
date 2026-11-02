@@ -2,6 +2,7 @@
 #define ASCEND_AST_HPP
 
 #include "lexer.hpp"
+#include "types.hpp"
 #include "value.hpp"
 
 #include <memory>
@@ -21,7 +22,7 @@ using StmtPtr = std::unique_ptr<Stmt>;
 
 enum class ExprKind {
     Literal, Variable, Unary, Binary, Logical, Ternary,
-    Call, Index, Slice, Member, List, Map, Function
+    Call, Index, Slice, Member, List, Map, Function, FString
 };
 
 struct Expr {
@@ -48,7 +49,7 @@ struct VariableExpr final : Expr {
 
 struct UnaryExpr final : Expr {
     UnaryExpr(int line, int column) : Expr(ExprKind::Unary, line, column) {}
-    TokenType op = TokenType::Minus;  // Minus or Not
+    TokenType op = TokenType::Minus;  // Minus, Not or Tilde
     ExprPtr operand;
 };
 
@@ -111,12 +112,24 @@ struct MapExpr final : Expr {
     std::vector<std::pair<ExprPtr, ExprPtr>> entries;
 };
 
+// f"text {expression:spec} more text"
+struct FStringPart {
+    std::string text;   // literal text (when expr is null)
+    ExprPtr expr;       // an interpolated expression
+    std::string spec;   // its format spec, e.g. ">8" or ".2f"
+};
+
+struct FStringExpr final : Expr {
+    FStringExpr(int line, int column) : Expr(ExprKind::FString, line, column) {}
+    std::vector<FStringPart> parts;
+};
+
 // ---------------------------------------------------------------------------
 // Statements
 
 enum class StmtKind {
     Expression, Declare, Assign, Block, If, While, For,
-    Break, Continue, Return, Function, Try, Throw
+    Break, Continue, Return, Function, Try, Throw, Match
 };
 
 struct Stmt {
@@ -140,6 +153,7 @@ struct Block {
 
 struct Param {
     std::string name;
+    TypeSpec type;         // `any` when the parameter has no type
     ExprPtr defaultValue;  // may be null
 };
 
@@ -148,6 +162,7 @@ struct FunctionExpr final : Expr {
     std::string name;  // empty for anonymous functions
     std::vector<Param> params;
     size_t requiredParams = 0;  // parameters without a default value
+    TypeSpec returnType;        // `any` when the function has no return type
     Block body;
 };
 
@@ -156,11 +171,14 @@ struct ExpressionStmt final : Stmt {
     ExprPtr expr;
 };
 
-// name := value
+// name := value      type name = value      type name      const [type] name = value
 struct DeclareStmt final : Stmt {
     DeclareStmt(int line, int column) : Stmt(StmtKind::Declare, line, column) {}
     std::string name;
-    ExprPtr value;
+    TypeSpec type;          // `any` when no type was written
+    bool hasType = false;
+    bool constant = false;
+    ExprPtr value;          // null for `type name`, which starts at the type's zero value
 };
 
 // target = value, target += value, ...
@@ -226,6 +244,21 @@ struct TryStmt final : Stmt {
 struct ThrowStmt final : Stmt {
     ThrowStmt(int line, int column) : Stmt(StmtKind::Throw, line, column) {}
     ExprPtr value;
+};
+
+// match value {
+//     1, 2 => print("small")
+//     else => { print("other") }
+// }
+struct MatchArm {
+    std::vector<ExprPtr> patterns;  // empty for the default arm (`else` or `_`)
+    Block body;                     // a { block } or a single statement
+};
+
+struct MatchStmt final : Stmt {
+    MatchStmt(int line, int column) : Stmt(StmtKind::Match, line, column) {}
+    ExprPtr subject;
+    std::vector<MatchArm> arms;
 };
 
 struct Program {

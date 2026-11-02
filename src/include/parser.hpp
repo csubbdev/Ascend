@@ -4,6 +4,7 @@
 #include "ast.hpp"
 #include "error.hpp"
 #include "lexer.hpp"
+#include "stack_limit.hpp"
 
 #include <cstddef>
 #include <initializer_list>
@@ -43,8 +44,17 @@ private:
     StmtPtr tryStatement(const Token& keyword);
     StmtPtr throwStatement(const Token& keyword);
     StmtPtr functionDeclaration(const Token& keyword);
-    std::unique_ptr<FunctionExpr> functionRest(const Token& keyword, const std::string& name);
+    StmtPtr typedDeclaration();
+    StmtPtr typedFunctionDeclaration();
+    StmtPtr constDeclaration(const Token& keyword);
+    StmtPtr matchStatement(const Token& keyword);
+    std::unique_ptr<FunctionExpr> functionRest(const Token& keyword, const std::string& name,
+                                               const TypeSpec* returnType = nullptr);
+    TypeSpec parseType(bool allowVoid);
+    size_t typeLength(size_t offset) const;
+    static std::string unknownTypeMessage(const std::string& name);
     Block block(const std::string& what);
+    static void noteStatement(Block& block, const Stmt& stmt);
     void parseStatementInto(Block& block);
     ExprPtr condition(const std::string& keyword);
     void expectStatementEnd();
@@ -58,6 +68,10 @@ private:
     ExprPtr logicNot();
     ExprPtr equality();
     ExprPtr comparison();
+    ExprPtr bitOr();
+    ExprPtr bitXor();
+    ExprPtr bitAnd();
+    ExprPtr shift();
     ExprPtr additive();
     ExprPtr multiplicative();
     ExprPtr unary();
@@ -69,6 +83,8 @@ private:
     ExprPtr finishIndex(ExprPtr object, const Token& bracket);
     ExprPtr listLiteral(const Token& bracket);
     ExprPtr mapLiteral(const Token& brace);
+    ExprPtr fString(const Token& start);
+    ExprPtr numberLiteral(const Token& token, bool negate);
 
     // Token helpers
     const Token& peek(size_t ahead = 0) const;
@@ -89,6 +105,7 @@ private:
     std::vector<Diagnostic> errors_;
     bool incomplete_ = false;
     int depth_ = 0;
+    StackLimit stack_;
 };
 
 }  // namespace ascend

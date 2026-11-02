@@ -1,6 +1,14 @@
 #include "interpreter.hpp"
 
+#include "lexer.hpp"
+#include "numeric.hpp"
+#include "parser.hpp"
+#include "runner.hpp"
+#include "semantic_analyzer.hpp"
+#include "stack_limit.hpp"
 #include "stdlib.hpp"
+#include "typecheck.hpp"
+#include "utf8.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -10,24 +18,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <sys/resource.h>
-#endif
-#if defined(_MSC_VER)
-#include <intrin.h>
-#endif
 
 namespace ascend {
 
 namespace {
 
 constexpr int kDefaultMaxCallDepth = 100000;
-constexpr size_t kMiB = 1024 * 1024;
 constexpr size_t kMinCollectionThreshold = 10000;
 constexpr size_t kMaxRepeatSize = size_t(1) << 28;
-
-constexpr int64_t kIntMax = std::numeric_limits<int64_t>::max();
-constexpr int64_t kIntMin = std::numeric_limits<int64_t>::min();
 
 const char* operatorSymbol(TokenType op) {
     switch (op) {
@@ -37,6 +35,11 @@ const char* operatorSymbol(TokenType op) {
         case TokenType::StarStar: return "**";
         case TokenType::Slash: return "/";
         case TokenType::Percent: return "%";
+        case TokenType::Ampersand: return "&";
+        case TokenType::Pipe: return "|";
+        case TokenType::Caret: return "^";
+        case TokenType::ShiftLeft: return "<<";
+        case TokenType::ShiftRight: return ">>";
         case TokenType::EqualEqual: return "==";
         case TokenType::NotEqual: return "!=";
         case TokenType::Less: return "<";
@@ -48,6 +51,23 @@ const char* operatorSymbol(TokenType op) {
     }
 }
 
+bool toNumOp(TokenType op, NumOp& out) {
+    switch (op) {
+        case TokenType::Plus: out = NumOp::Add; return true;
+        case TokenType::Minus: out = NumOp::Sub; return true;
+        case TokenType::Star: out = NumOp::Mul; return true;
+        case TokenType::Slash: out = NumOp::Div; return true;
+        case TokenType::Percent: out = NumOp::Mod; return true;
+        case TokenType::StarStar: out = NumOp::Pow; return true;
+        case TokenType::Ampersand: out = NumOp::BitAnd; return true;
+        case TokenType::Pipe: out = NumOp::BitOr; return true;
+        case TokenType::Caret: out = NumOp::BitXor; return true;
+        case TokenType::ShiftLeft: out = NumOp::Shl; return true;
+        case TokenType::ShiftRight: out = NumOp::Shr; return true;
+        default: return false;
+    }
+}
+
 TokenType compoundToBinary(TokenType op) {
     switch (op) {
         case TokenType::PlusEqual: return TokenType::Plus;
@@ -55,64 +75,47 @@ TokenType compoundToBinary(TokenType op) {
         case TokenType::StarEqual: return TokenType::Star;
         case TokenType::SlashEqual: return TokenType::Slash;
         case TokenType::PercentEqual: return TokenType::Percent;
+        case TokenType::AmpersandEqual: return TokenType::Ampersand;
+        case TokenType::PipeEqual: return TokenType::Pipe;
+        case TokenType::CaretEqual: return TokenType::Caret;
+        case TokenType::ShiftLeftEqual: return TokenType::ShiftLeft;
+        case TokenType::ShiftRightEqual: return TokenType::ShiftRight;
         default: return op;
     }
 }
 
-[[noreturn]] void overflow() { throw RuntimeError("integer overflow (the result doesn't fit in a 64-bit int)"); }
-
-int64_t checkedAdd(int64_t a, int64_t b) {
-    if ((b > 0 && a > kIntMax - b) || (b < 0 && a < kIntMin - b)) overflow();
-    return a + b;
-}
-
-int64_t checkedSub(int64_t a, int64_t b) {
-    if ((b < 0 && a > kIntMax + b) || (b > 0 && a < kIntMin + b)) overflow();
-    return a - b;
-}
-
-int64_t checkedMul(int64_t a, int64_t b) {
-    if (a == 0 || b == 0) return 0;
-    bool overflows;
-    if (a > 0) {
-        overflows = b > 0 ? a > kIntMax / b : b < kIntMin / a;
-    } else {
-        overflows = b > 0 ? a < kIntMin / b : a < kIntMax / b;
-    }
-    if (overflows) overflow();
-    return a * b;
-}
-
-Value power(const Value& base, const Value& exponent) {
-    if (base.isInt() && exponent.isInt() && exponent.asInt() >= 0) {
-        int64_t result = 1;
-        int64_t factor = base.asInt();
-        int64_t remaining = exponent.asInt();
-        while (remaining > 0) {
-            if (remaining & 1) result = checkedMul(result, factor);
-            remaining >>= 1;
-            if (remaining > 0) factor = checkedMul(factor, factor);
-        }
-        return Value::fromInt(result);
-    }
-    return Value::fromFloat(std::pow(base.toDouble(), exponent.toDouble()));
-}
-
-int64_t repeatCount(int64_t count, size_t unitSize) {
-    if (count <= 0) return 0;
-    if (unitSize != 0 && static_cast<uint64_t>(count) > kMaxRepeatSize / unitSize) {
+int64_t repeatCount(const Value& count, size_t unitSize) {
+    int64_t n = 0;
+    if (!toInt64(count, n)) throw RuntimeError("the repeated result would be too large");
+    if (n <= 0) return 0;
+    if (unitSize != 0 && static_cast<uint64_t>(n) > kMaxRepeatSize / unitSize) {
         throw RuntimeError("the repeated result would be too large");
     }
-    return count;
+    return n;
 }
 
-std::string repeatString(const std::string& text, int64_t count) {
-    count = repeatCount(count, text.size());
+std::string repeatString(const std::string& text, const Value& count) {
+    int64_t n = repeatCount(count, text.size());
     std::string result;
-    result.reserve(text.size() * static_cast<size_t>(count));
-    for (int64_t i = 0; i < count; ++i) result += text;
+    result.reserve(text.size() * static_cast<size_t>(n));
+    for (int64_t i = 0; i < n; ++i) result += text;
     return result;
 }
+
+// 'a' + 1 == 'b'
+Value shiftChar(const Value& c, const Value& amount, int sign) {
+    int64_t n = 0;
+    if (!toInt64(amount, n) || n > 0x10FFFF || n < -0x10FFFF) {
+        throw RuntimeError(toRepr(c) + (sign > 0 ? " + " : " - ") + toString(amount) + " is not a valid character code");
+    }
+    int64_t result = static_cast<int64_t>(c.asChar()) + sign * n;
+    if (result < 0 || !isValidCodePoint(static_cast<char32_t>(result))) {
+        throw RuntimeError(std::to_string(result) + " is not a valid character code");
+    }
+    return Value::fromChar(static_cast<char32_t>(result));
+}
+
+std::string textOf(const Value& v) { return v.isChar() ? encodeUtf8(v.asChar()) : v.asString(); }
 
 size_t editDistance(const std::string& a, const std::string& b) {
     std::vector<size_t> row(b.size() + 1);
@@ -162,40 +165,69 @@ std::string arityMessage(const std::string& name, size_t min, long long max, siz
     return who + " expects " + expected + " but got " + std::to_string(got);
 }
 
-// Address of the current stack frame, used to measure how much stack is in use.
-uintptr_t stackAddress() {
-#if defined(__GNUC__) || defined(__clang__)
-    return reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
-#elif defined(_MSC_VER)
-    return reinterpret_cast<uintptr_t>(_AddressOfReturnAddress());
-#else
-    volatile char marker = 0;
-    return reinterpret_cast<uintptr_t>(&marker);
-#endif
+std::string functionLabel(const std::string& name) { return name.empty() ? "this function" : name + "()"; }
+
+bool isAbsolutePath(const std::string& path) {
+    return (!path.empty() && (path[0] == '/' || path[0] == '\\')) || (path.size() > 1 && path[1] == ':');
 }
 
-// How much stack the interpreter may use before reporting a stack overflow.
-// Leaves a safety margin below the real limit so the error can be reported
-// cleanly instead of crashing.
-size_t stackBudget() {
-    size_t total = 8 * kMiB;  // the default on Linux and macOS; CMake links Windows builds with 8 MB too
-#if defined(__unix__) || defined(__APPLE__)
-    struct rlimit limit;
-    if (getrlimit(RLIMIT_STACK, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY) {
-        total = static_cast<size_t>(limit.rlim_cur);
-    }
-#endif
-    return total > 2 * kMiB ? total - std::max(kMiB, total / 8) : total / 2;
-}
-
-void locate(RuntimeError& error, int line, int column) {
-    if (!error.hasLocation()) {
-        error.line = line;
-        error.column = column;
-    }
+bool hasExtension(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    size_t dot = path.find_last_of('.');
+    return dot != std::string::npos && (slash == std::string::npos || dot > slash);
 }
 
 }  // namespace
+
+// Switches the current function and source file for the duration of a call,
+// and restores them afterwards, even when an error unwinds the call.
+class Interpreter::FrameGuard {
+public:
+    FrameGuard(Interpreter& interpreter, const SourceFile* source, const FunctionExpr* function)
+        : interpreter_(interpreter),
+          savedSource_(interpreter.currentSource_),
+          savedFunction_(interpreter.currentFunction_) {
+        interpreter_.currentSource_ = source;
+        interpreter_.currentFunction_ = function;
+        ++interpreter_.callDepth_;
+    }
+    ~FrameGuard() {
+        interpreter_.currentSource_ = savedSource_;
+        interpreter_.currentFunction_ = savedFunction_;
+        --interpreter_.callDepth_;
+    }
+    FrameGuard(const FrameGuard&) = delete;
+    FrameGuard& operator=(const FrameGuard&) = delete;
+
+    const SourceFile* callerSource() const { return savedSource_; }
+
+private:
+    Interpreter& interpreter_;
+    const SourceFile* savedSource_;
+    const FunctionExpr* savedFunction_;
+};
+
+// Notes where a runtime error happened, as the error unwinds through the
+// expressions and statements being evaluated: the innermost one is the
+// location reported. Doing this in a destructor instead of catching and
+// rethrowing at every level matters for deep recursion: with MSVC, each
+// rethrow happens on top of the frames being unwound, so thousands of them
+// overflow the stack.
+class Interpreter::ErrorSite {
+public:
+    ErrorSite(Interpreter& interpreter, int line, int column)
+        : interpreter_(interpreter), line_(line), column_(column) {}
+    ~ErrorSite() {
+        if (runtimeErrorPending()) interpreter_.noteErrorSite(line_, column_);
+    }
+    ErrorSite(const ErrorSite&) = delete;
+    ErrorSite& operator=(const ErrorSite&) = delete;
+
+private:
+    Interpreter& interpreter_;
+    int line_;
+    int column_;
+};
 
 // ---------------------------------------------------------------------------
 // Setup and memory management
@@ -204,21 +236,21 @@ Interpreter::Interpreter(std::ostream& out, std::istream& in)
     : out_(out),
       in_(in),
       maxCallDepth_(kDefaultMaxCallDepth),
-      stackBase_(stackAddress()),
-      stackBudget_(stackBudget()),
       nextCollection_(kMinCollectionThreshold) {
     try {
         random_.seed(std::random_device{}());
     } catch (...) {
         random_.seed(static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()));
     }
-    globals_ = newEnvironment(nullptr);
+    builtins_ = newEnvironment(nullptr);
+    globals_ = newEnvironment(builtins_);
     registerStandardLibrary(*this);
-    if (Value* range = globals_->find("range")) rangeFunction_ = &range->asFunction();
+    if (Variable* range = builtins_->find("range")) rangeFunction_ = &range->value.asFunction();
 }
 
 Interpreter::~Interpreter() {
     // Break every remaining reference cycle so all memory is released.
+    modules_.clear();
     std::vector<std::shared_ptr<GcObject>> live;
     for (auto& weak : heap_) {
         if (auto strong = weak.lock()) live.push_back(std::move(strong));
@@ -308,35 +340,167 @@ size_t Interpreter::collectGarbage() {
 }
 
 void Interpreter::defineNative(const std::string& name, int minArgs, int maxArgs, NativeFn fn) {
-    globals_->define(name, Value::fromFunction(std::make_shared<NativeFunction>(name, minArgs, maxArgs, std::move(fn))));
+    builtins_->define(name, Value::fromFunction(std::make_shared<NativeFunction>(name, minArgs, maxArgs, std::move(fn))));
 }
 
+void Interpreter::defineBuiltin(const std::string& name, Value value) { builtins_->define(name, std::move(value)); }
+
 void Interpreter::defineGlobal(const std::string& name, Value value) { globals_->define(name, std::move(value)); }
+
+void Interpreter::noteErrorSite(int line, int column) {
+    runtimeErrorPending() = false;
+    hasErrorSite_ = true;
+    errorLine_ = line;
+    errorColumn_ = column;
+    errorSource_ = currentSource_;
+}
+
+// Fills in where an error happened, if it doesn't say already.
+void Interpreter::applyErrorSite(RuntimeError& error) {
+    if (hasErrorSite_) {
+        if (!error.hasLocation()) {
+            error.line = errorLine_;
+            error.column = errorColumn_;
+        }
+        if (error.source == nullptr) error.source = errorSource_;
+    }
+    if (error.source == nullptr) error.source = currentSource_;
+    clearErrorSite();
+}
+
+void Interpreter::clearErrorSite() {
+    runtimeErrorPending() = false;
+    hasErrorSite_ = false;
+}
+
+void Interpreter::checkStack() const {
+    if (stack_.exceeded()) {
+        throw RuntimeError("stack overflow: too much recursion (is there a recursive call without a base case?)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Programs and modules
+
+void Interpreter::execute(std::unique_ptr<Program> program, std::unique_ptr<SourceFile> source) {
+    if (!source) {
+        source = std::make_unique<SourceFile>();
+        source->name = "<input>";
+    }
+    sources_.push_back(std::move(source));
+    programs_.push_back(std::move(program));
+    const SourceFile* saved = currentSource_;
+    currentSource_ = sources_.back().get();
+    clearErrorSite();
+    try {
+        runTopLevel(*programs_.back(), globals_, replMode_);
+    } catch (RuntimeError& error) {
+        applyErrorSite(error);
+        currentSource_ = saved;
+        throw;
+    } catch (...) {
+        currentSource_ = saved;
+        throw;
+    }
+    currentSource_ = saved;
+}
+
+void Interpreter::runTopLevel(const Program& program, const EnvPtr& env, bool echo) {
+    hoistFunctions(program.body, env);
+    for (const auto& stmt : program.body.statements) {
+        if (echo && stmt->kind == StmtKind::Expression) {
+            Value result = eval(*stmt->as<ExpressionStmt>().expr, env);
+            if (!result.isNull()) out_ << toRepr(result) << '\n';
+            continue;
+        }
+        exec(*stmt, env);
+    }
+}
+
+// Relative imports are resolved from the directory of the running file.
+std::string Interpreter::importDirectory() const {
+    if (currentSource_ == nullptr || currentSource_->name.empty() || currentSource_->name[0] == '<') return "";
+    size_t slash = currentSource_->name.find_last_of("/\\");
+    return slash == std::string::npos ? "" : currentSource_->name.substr(0, slash + 1);
+}
+
+Value Interpreter::importModule(const std::string& path) {
+    std::string resolved = isAbsolutePath(path) ? path : importDirectory() + path;
+    if (!hasExtension(resolved)) resolved += ".asc";
+
+    auto cached = modules_.find(resolved);
+    if (cached != modules_.end()) return cached->second;
+    if (loadingModules_.count(resolved) != 0) {
+        throw RuntimeError("can't import \"" + path + "\": it imports itself (directly or through other files)");
+    }
+
+    std::string text;
+    if (!readTextFile(resolved, text)) throw RuntimeError("can't import \"" + path + "\": file '" + resolved + "' not found");
+    prepareSource(text);
+
+    // Check the whole module before running any of it.
+    std::string problems;
+    auto collect = [&](const std::vector<Diagnostic>& diagnostics, const char* kind) {
+        for (const auto& d : diagnostics) problems += formatDiagnostic(text, resolved, d.line, d.column, kind, d.message);
+    };
+    Lexer lexer(text);
+    std::vector<Token> tokens = lexer.tokenize();
+    std::unique_ptr<Program> program;
+    if (!lexer.errors().empty()) {
+        collect(lexer.errors(), "syntax error");
+    } else {
+        Parser parser(std::move(tokens));
+        program = parser.parseProgram();
+        if (!parser.errors().empty()) {
+            collect(parser.errors(), "syntax error");
+        } else {
+            SemanticAnalyzer analyzer;
+            collect(analyzer.analyze(*program), "error");
+        }
+    }
+    if (!problems.empty()) {
+        if (problems.back() == '\n') problems.pop_back();
+        throw RuntimeError("can't import \"" + path + "\" because it has errors:\n" + problems);
+    }
+
+    auto file = std::make_unique<SourceFile>();
+    file->name = resolved;
+    file->text = std::move(text);
+    sources_.push_back(std::move(file));
+    programs_.push_back(std::move(program));
+    const SourceFile* source = sources_.back().get();
+    const Program& module = *programs_.back();
+
+    auto env = newEnvironment(builtins_);
+    loadingModules_.insert(resolved);
+    try {
+        FrameGuard frame(*this, source, nullptr);
+        runTopLevel(module, env, false);
+    } catch (...) {
+        loadingModules_.erase(resolved);
+        throw;
+    }
+    loadingModules_.erase(resolved);
+
+    // Export every top-level name that doesn't start with an underscore.
+    std::vector<std::string> names;
+    for (const auto& entry : env->locals()) {
+        if (entry.first.empty() || entry.first[0] != '_') names.push_back(entry.first);
+    }
+    std::sort(names.begin(), names.end());
+    auto exports = newMap();
+    for (const auto& name : names) exports->set(Value::fromString(name), env->findLocal(name)->value);
+    Value result = Value::fromMap(exports);
+    modules_[resolved] = result;
+    return result;
+}
 
 // ---------------------------------------------------------------------------
 // Statements
 
-void Interpreter::execute(std::unique_ptr<Program> program) {
-    programs_.push_back(std::move(program));
-    const Block& body = programs_.back()->body;
-    hoistFunctions(body, globals_);
-    for (const auto& stmt : body.statements) {
-        if (replMode_ && stmt->kind == StmtKind::Expression) {
-            Value result = eval(*stmt->as<ExpressionStmt>().expr, globals_);
-            if (!result.isNull()) out_ << toRepr(result) << '\n';
-            continue;
-        }
-        exec(*stmt, globals_);
-    }
-}
-
 Interpreter::Flow Interpreter::exec(const Stmt& stmt, const EnvPtr& env) {
-    try {
-        return execStmt(stmt, env);
-    } catch (RuntimeError& error) {
-        locate(error, stmt.line, stmt.column);
-        throw;
-    }
+    ErrorSite site(*this, stmt.line, stmt.column);
+    return execStmt(stmt, env);
 }
 
 Interpreter::Flow Interpreter::execStmt(const Stmt& stmt, const EnvPtr& env) {
@@ -345,19 +509,8 @@ Interpreter::Flow Interpreter::execStmt(const Stmt& stmt, const EnvPtr& env) {
             eval(*stmt.as<ExpressionStmt>().expr, env);
             return Flow::Normal;
 
-        case StmtKind::Declare: {
-            const auto& decl = stmt.as<DeclareStmt>();
-            Value value;
-            if (decl.value->kind == ExprKind::Function) {
-                // `name := func(...) {...}` gives the function a name for messages.
-                const auto& function = decl.value->as<FunctionExpr>();
-                value = makeFunction(function, env, function.name.empty() ? decl.name : function.name);
-            } else {
-                value = eval(*decl.value, env);
-            }
-            env->define(decl.name, std::move(value));
-            return Flow::Normal;
-        }
+        case StmtKind::Declare:
+            return execDeclare(stmt.as<DeclareStmt>(), env);
 
         case StmtKind::Assign:
             return execAssign(stmt.as<AssignStmt>(), env);
@@ -391,11 +544,8 @@ Interpreter::Flow Interpreter::execStmt(const Stmt& stmt, const EnvPtr& env) {
         case StmtKind::Continue:
             return Flow::Continue;
 
-        case StmtKind::Return: {
-            const auto& ret = stmt.as<ReturnStmt>();
-            returnValue_ = ret.value ? eval(*ret.value, env) : Value();
-            return Flow::Return;
-        }
+        case StmtKind::Return:
+            return execReturn(stmt.as<ReturnStmt>(), env);
 
         case StmtKind::Function:
             return Flow::Normal;  // already defined when its block started (hoisting)
@@ -405,8 +555,11 @@ Interpreter::Flow Interpreter::execStmt(const Stmt& stmt, const EnvPtr& env) {
 
         case StmtKind::Throw: {
             Value value = eval(*stmt.as<ThrowStmt>().value, env);
-            throw ThrownValue{std::move(value), stmt.line, stmt.column};
+            throw ThrownValue{std::move(value), stmt.line, stmt.column, currentSource_};
         }
+
+        case StmtKind::Match:
+            return execMatch(stmt.as<MatchStmt>(), env);
     }
     return Flow::Normal;
 }
@@ -438,6 +591,53 @@ void Interpreter::hoistFunctions(const Block& block, const EnvPtr& env) {
     }
 }
 
+// The starting value of `type name` without an initializer.
+Value Interpreter::zeroValue(const TypeSpec& type) {
+    if (type.nullable) return Value();
+    switch (type.kind) {
+        case TypeKind::Bool: return Value::fromBool(false);
+        case TypeKind::Number:
+            return isFloatKind(type.num) ? Value::fromFloat(0.0, type.num) : Value::fromInt(0, type.num);
+        case TypeKind::Char: return Value::fromChar(0);
+        case TypeKind::String: return Value::fromString("");
+        case TypeKind::List: return Value::fromList(newList());
+        case TypeKind::Map: return Value::fromMap(newMap());
+        default: return Value();
+    }
+}
+
+Value Interpreter::coerceVariable(const std::string& name, const TypeSpec& type, Value value) {
+    if (type.isAny()) return value;
+    Value converted;
+    CoerceFailure failure;
+    if (!coerceToType(value, type, converted, failure)) {
+        throw RuntimeError(
+            withHint("'" + name + "' is declared as " + type.name() + ", so it can't hold " + failure.what, failure));
+    }
+    return converted;
+}
+
+Interpreter::Flow Interpreter::execDeclare(const DeclareStmt& decl, const EnvPtr& env) {
+    Variable* existing = env->findLocal(decl.name);
+    if (existing != nullptr && existing->constant) {
+        throw RuntimeError("'" + decl.name + "' is a constant and can't be declared again");
+    }
+
+    Value value;
+    if (!decl.value) {
+        value = zeroValue(decl.type);
+    } else if (decl.value->kind == ExprKind::Function) {
+        // `name := func(...) {...}` gives the function a name for messages.
+        const auto& function = decl.value->as<FunctionExpr>();
+        value = makeFunction(function, env, function.name.empty() ? decl.name : function.name);
+    } else {
+        value = eval(*decl.value, env);
+    }
+    if (decl.hasType) value = coerceVariable(decl.name, decl.type, std::move(value));
+    env->define(decl.name, std::move(value), decl.type, decl.constant);
+    return Flow::Normal;
+}
+
 Interpreter::Flow Interpreter::execAssign(const AssignStmt& stmt, const EnvPtr& env) {
     const bool compound = stmt.op != TokenType::Equal;
     const TokenType op = compoundToBinary(stmt.op);
@@ -445,15 +645,19 @@ Interpreter::Flow Interpreter::execAssign(const AssignStmt& stmt, const EnvPtr& 
     switch (stmt.target->kind) {
         case ExprKind::Variable: {
             const std::string& name = stmt.target->as<VariableExpr>().name;
-            Value* slot = env->find(name);
-            if (slot == nullptr) {
+            Variable* variable = env->find(name);
+            if (variable == nullptr) {
                 std::string hint = suggestName(name, *env);
                 if (hint.empty()) hint = " (to create it, write '" + name + " := ...')";
                 throw RuntimeError("undefined variable '" + name + "'" + hint, stmt.target->line, stmt.target->column);
             }
+            if (variable->constant) {
+                throw RuntimeError("can't change '" + name + "': it's a constant", stmt.target->line,
+                                   stmt.target->column);
+            }
             Value result;
             if (compound) {
-                Value current = *slot;
+                Value current = variable->value;
                 Value operand = eval(*stmt.value, env);
                 result = binaryOp(op, current, operand);
             } else {
@@ -461,7 +665,8 @@ Interpreter::Flow Interpreter::execAssign(const AssignStmt& stmt, const EnvPtr& 
             }
             // Evaluating the right side may have defined new variables, which
             // can move existing ones, so look the variable up again.
-            *env->find(name) = std::move(result);
+            variable = env->find(name);
+            variable->value = coerceVariable(name, variable->type, std::move(result));
             return Flow::Normal;
         }
 
@@ -485,7 +690,7 @@ Interpreter::Flow Interpreter::execAssign(const AssignStmt& stmt, const EnvPtr& 
             const auto& target = stmt.target->as<MemberExpr>();
             Value object = eval(*target.object, env);
             if (!object.isMap()) {
-                throw RuntimeError(std::string("can't set field '") + target.name + "' on a " + object.typeName() +
+                throw RuntimeError("can't set field '" + target.name + "' on " + aTypeName(object) +
                                        " value (only maps have fields)",
                                    target.line, target.column);
             }
@@ -507,6 +712,29 @@ Interpreter::Flow Interpreter::execAssign(const AssignStmt& stmt, const EnvPtr& 
     }
 }
 
+Interpreter::Flow Interpreter::execReturn(const ReturnStmt& stmt, const EnvPtr& env) {
+    Value value = stmt.value ? eval(*stmt.value, env) : Value();
+    if (currentFunction_ != nullptr && !currentFunction_->returnType.isAny()) {
+        const TypeSpec& type = currentFunction_->returnType;
+        if (type.kind == TypeKind::Void) {
+            if (!value.isNull()) {
+                throw RuntimeError(functionLabel(currentFunction_->name) + " returns void, so it can't return a value");
+            }
+        } else {
+            Value converted;
+            CoerceFailure failure;
+            if (!coerceToType(value, type, converted, failure)) {
+                throw RuntimeError(withHint(functionLabel(currentFunction_->name) + " must return " + type.name() +
+                                                ", but returned " + failure.what,
+                                            failure));
+            }
+            value = std::move(converted);
+        }
+    }
+    returnValue_ = std::move(value);
+    return Flow::Return;
+}
+
 Interpreter::Flow Interpreter::execFor(const ForStmt& loop, const EnvPtr& env) {
     // Runs one iteration. With one loop variable it gets `item`; with two,
     // the first gets `key` (an index for lists and strings) and the second `item`.
@@ -525,16 +753,14 @@ Interpreter::Flow Interpreter::execFor(const ForStmt& loop, const EnvPtr& env) {
     if (loop.iterable->kind == ExprKind::Call && rangeFunction_ != nullptr) {
         const auto& call = loop.iterable->as<CallExpr>();
         if (call.callee->kind == ExprKind::Variable) {
-            Value* callee = env->find(call.callee->as<VariableExpr>().name);
-            if (callee != nullptr && callee->isFunction() && &callee->asFunction() == rangeFunction_) {
+            Variable* callee = env->find(call.callee->as<VariableExpr>().name);
+            if (callee != nullptr && callee->value.isFunction() && &callee->value.asFunction() == rangeFunction_) {
                 std::vector<Value> args;
                 for (const auto& arg : call.args) args.push_back(eval(*arg, env));
                 RangeSpec range;
-                try {
+                {
+                    ErrorSite site(*this, call.line, call.column);  // a bad range() argument
                     range = makeRange(args);
-                } catch (RuntimeError& error) {
-                    locate(error, call.line, call.column);
-                    throw;
                 }
                 for (uint64_t i = 0; i < range.count; ++i) {
                     Flow flow = iteration(Value::fromInt(static_cast<int64_t>(i)), Value::fromInt(range.at(i)));
@@ -560,8 +786,10 @@ Interpreter::Flow Interpreter::execFor(const ForStmt& loop, const EnvPtr& env) {
         }
         case Value::Type::String: {
             const std::string text = iterable.asString();
-            for (size_t i = 0; i < text.size(); ++i) {
-                Flow flow = iteration(Value::fromInt(static_cast<int64_t>(i)), Value::fromString(std::string(1, text[i])));
+            int64_t index = 0;
+            for (size_t pos = 0; pos < text.size(); ++index) {
+                char32_t c = decodeUtf8(text, pos);
+                Flow flow = iteration(Value::fromInt(index), Value::fromChar(c));
                 if (flow == Flow::Break) break;
                 if (flow == Flow::Return) return flow;
             }
@@ -578,7 +806,7 @@ Interpreter::Flow Interpreter::execFor(const ForStmt& loop, const EnvPtr& env) {
             return Flow::Normal;
         }
         default:
-            throw RuntimeError(std::string("can't loop over a ") + iterable.typeName() +
+            throw RuntimeError("can't loop over " + aTypeName(iterable) +
                                    " value (expected a list, map, string or range)",
                                loop.iterable->line, loop.iterable->column);
     }
@@ -589,6 +817,7 @@ Interpreter::Flow Interpreter::execTry(const TryStmt& stmt, const EnvPtr& env) {
     try {
         return execScoped(stmt.body, env);
     } catch (const RuntimeError& error) {
+        clearErrorSite();  // handled, so where it happened no longer matters
         caught = Value::fromString(error.what());
     } catch (const ThrownValue& thrown) {
         caught = thrown.value;
@@ -598,25 +827,29 @@ Interpreter::Flow Interpreter::execTry(const TryStmt& stmt, const EnvPtr& env) {
     return execBlock(stmt.handler, scope);
 }
 
+// Runs the first arm with a pattern equal to the subject, or the `else` arm.
+Interpreter::Flow Interpreter::execMatch(const MatchStmt& stmt, const EnvPtr& env) {
+    Value subject = eval(*stmt.subject, env);
+    const MatchArm* fallback = nullptr;
+    for (const auto& arm : stmt.arms) {
+        if (arm.patterns.empty()) {
+            fallback = &arm;
+            continue;
+        }
+        for (const auto& pattern : arm.patterns) {
+            if (valuesEqual(subject, eval(*pattern, env))) return execScoped(arm.body, env);
+        }
+    }
+    return fallback != nullptr ? execScoped(fallback->body, env) : Flow::Normal;
+}
+
 // ---------------------------------------------------------------------------
 // Expressions
 
-void Interpreter::checkStack() const {
-    uintptr_t here = stackAddress();
-    size_t used = here > stackBase_ ? here - stackBase_ : stackBase_ - here;
-    if (used > stackBudget_) {
-        throw RuntimeError("stack overflow: too much recursion (is there a recursive call without a base case?)");
-    }
-}
-
 Value Interpreter::eval(const Expr& expr, const EnvPtr& env) {
-    try {
-        checkStack();
-        return evalExpr(expr, env);
-    } catch (RuntimeError& error) {
-        locate(error, expr.line, expr.column);
-        throw;
-    }
+    ErrorSite site(*this, expr.line, expr.column);
+    checkStack();
+    return evalExpr(expr, env);
 }
 
 Value Interpreter::evalExpr(const Expr& expr, const EnvPtr& env) {
@@ -686,12 +919,8 @@ Value Interpreter::evalExpr(const Expr& expr, const EnvPtr& env) {
             for (const auto& entry : literal.entries) {
                 Value key = eval(*entry.first, env);
                 Value value = eval(*entry.second, env);
-                try {
-                    map->set(key, std::move(value));
-                } catch (RuntimeError& error) {
-                    locate(error, entry.first->line, entry.first->column);
-                    throw;
-                }
+                ErrorSite site(*this, entry.first->line, entry.first->column);  // e.g. a list used as a key
+                map->set(key, std::move(value));
             }
             return Value::fromMap(map);
         }
@@ -700,42 +929,64 @@ Value Interpreter::evalExpr(const Expr& expr, const EnvPtr& env) {
             const auto& function = expr.as<FunctionExpr>();
             return makeFunction(function, env, function.name);
         }
+
+        case ExprKind::FString:
+            return evalFString(expr.as<FStringExpr>(), env);
     }
     return Value();
 }
 
 Value Interpreter::evalVariable(const VariableExpr& expr, const EnvPtr& env) {
-    Value* value = env->find(expr.name);
-    if (value == nullptr) {
+    Variable* variable = env->find(expr.name);
+    if (variable == nullptr) {
         throw RuntimeError("undefined variable '" + expr.name + "'" + suggestName(expr.name, *env), expr.line,
                            expr.column);
     }
-    return *value;
+    return variable->value;
 }
 
 Value Interpreter::evalUnary(const UnaryExpr& expr, const EnvPtr& env) {
     Value operand = eval(*expr.operand, env);
-    if (expr.op == TokenType::Not) return Value::fromBool(!operand.truthy());
-    if (operand.isInt()) {
-        if (operand.asInt() == kIntMin) overflow();
-        return Value::fromInt(-operand.asInt());
+    switch (expr.op) {
+        case TokenType::Not:
+            return Value::fromBool(!operand.truthy());
+        case TokenType::Tilde:
+            if (!operand.isInt()) throw RuntimeError("'~' needs an integer, not " + aTypeName(operand));
+            return bitwiseNot(operand);
+        default:
+            if (!operand.isNumber()) throw RuntimeError("can't negate " + aTypeName(operand) + " value");
+            return negateNumber(operand);
     }
-    if (operand.isFloat()) return Value::fromFloat(-operand.asFloat());
-    throw RuntimeError(std::string("can't negate a ") + operand.typeName() + " value");
 }
 
 Value Interpreter::evalMember(const MemberExpr& expr, const EnvPtr& env) {
     Value object = eval(*expr.object, env);
     if (!object.isMap()) {
         std::string hint;
-        Value* function = env->find(expr.name);
-        if (function != nullptr && function->isFunction()) hint = " (to call " + expr.name + "(), write ." + expr.name + "())";
-        throw RuntimeError(std::string("can't read field '") + expr.name + "' of a " + object.typeName() + " value" + hint,
+        Variable* function = env->find(expr.name);
+        if (function != nullptr && function->value.isFunction()) {
+            hint = " (to call " + expr.name + "(), write ." + expr.name + "())";
+        }
+        throw RuntimeError(std::string("can't read field '") + expr.name + "' of " + aTypeName(object) + " value" + hint,
                            expr.line, expr.column);
     }
     const Value* field = object.asMap().find(Value::fromString(expr.name));
     if (field == nullptr) throw RuntimeError("map has no key \"" + expr.name + "\"", expr.line, expr.column);
     return *field;
+}
+
+Value Interpreter::evalFString(const FStringExpr& expr, const EnvPtr& env) {
+    std::string result;
+    for (const auto& part : expr.parts) {
+        if (!part.expr) {
+            result += part.text;
+            continue;
+        }
+        Value value = eval(*part.expr, env);
+        ErrorSite site(*this, part.expr->line, part.expr->column);  // e.g. a bad format spec
+        result += part.spec.empty() ? toString(value) : formatValue(value, part.spec);
+    }
+    return Value::fromString(result);
 }
 
 // Calls `f(args)`. A method-style call `x.f(args)` calls the function stored
@@ -753,14 +1004,15 @@ Value Interpreter::evalCall(const CallExpr& expr, const EnvPtr& env) {
         if (field != nullptr) {
             callee = *field;
         } else {
-            Value* function = env->find(member.name);
-            if (function == nullptr || !function->isFunction()) {
-                std::string message = object.isMap()
-                                          ? "map has no key \"" + member.name + "\" and there is no function named '" + member.name + "'"
-                                          : std::string("a ") + object.typeName() + " value has no method '" + member.name + "'";
+            Variable* function = env->find(member.name);
+            if (function == nullptr || !function->value.isFunction()) {
+                std::string message =
+                    object.isMap()
+                        ? "map has no key \"" + member.name + "\" and there is no function named '" + member.name + "'"
+                        : aTypeName(object) + " value has no method '" + member.name + "'";
                 throw RuntimeError(message + suggestName(member.name, *env), member.line, member.column);
             }
-            callee = *function;
+            callee = function->value;
             args.push_back(std::move(object));
         }
     } else {
@@ -772,12 +1024,12 @@ Value Interpreter::evalCall(const CallExpr& expr, const EnvPtr& env) {
 }
 
 Value Interpreter::makeFunction(const FunctionExpr& expr, const EnvPtr& env, const std::string& name) {
-    return Value::fromFunction(track(std::make_shared<FunctionObj>(name, &expr, env)));
+    return Value::fromFunction(track(std::make_shared<FunctionObj>(name, &expr, env, currentSource_)));
 }
 
 Value Interpreter::call(const Value& callee, std::vector<Value> args, int line, int column) {
     if (!callee.isFunction()) {
-        throw RuntimeError(std::string("a ") + callee.typeName() + " value can't be called like a function", line, column);
+        throw RuntimeError(aTypeName(callee) + " value can't be called like a function", line, column);
     }
     Callable& callable = callee.asFunction();
 
@@ -789,12 +1041,8 @@ Value Interpreter::call(const Value& callee, std::vector<Value> args, int line, 
             throw RuntimeError(arityMessage(native.name, static_cast<size_t>(native.minArgs), native.maxArgs, count),
                                line, column);
         }
-        try {
-            return native.fn(*this, args);
-        } catch (RuntimeError& error) {
-            locate(error, line, column);
-            throw;
-        }
+        // Errors from the builtin are reported at the call (the enclosing ErrorSite).
+        return native.fn(*this, args);
     }
 
     auto& function = static_cast<FunctionObj&>(callable);
@@ -811,25 +1059,42 @@ Value Interpreter::call(const Value& callee, std::vector<Value> args, int line, 
     }
     checkStack();
 
-    struct DepthGuard {
-        explicit DepthGuard(int& counter) : depth(counter) { ++depth; }
-        ~DepthGuard() { --depth; }
-        int& depth;
-    } guard(callDepth_);
-
     auto scope = newEnvironment(function.closure);
-    for (size_t i = 0; i < decl.params.size(); ++i) {
-        if (i < args.size()) {
-            scope->define(decl.params[i].name, std::move(args[i]));
-        } else {
-            scope->define(decl.params[i].name, eval(*decl.params[i].defaultValue, scope));
+    {
+        FrameGuard frame(*this, function.source, &decl);
+        for (size_t i = 0; i < decl.params.size(); ++i) {
+            const Param& param = decl.params[i];
+            Value arg = i < args.size() ? std::move(args[i]) : eval(*param.defaultValue, scope);
+            if (!param.type.isAny()) {
+                Value converted;
+                CoerceFailure failure;
+                if (!coerceToType(arg, param.type, converted, failure)) {
+                    // Reported at the call site, so it belongs to the caller's file.
+                    RuntimeError error(withHint(functionLabel(function.name) + " expects '" + param.name + "' to be " + param.type.name() +
+                                                    ", but got " + failure.what,
+                                                failure),
+                                       line, column);
+                    error.source = frame.callerSource();
+                    throw error;
+                }
+                arg = std::move(converted);
+            }
+            scope->define(param.name, std::move(arg), param.type);
+        }
+
+        if (execBlock(decl.body, scope) == Flow::Return) {
+            Value result = std::move(returnValue_);
+            returnValue_ = Value();
+            return result;
         }
     }
 
-    if (execBlock(decl.body, scope) == Flow::Return) {
-        Value result = std::move(returnValue_);
-        returnValue_ = Value();
-        return result;
+    // The function ended without `return`.
+    const TypeSpec& type = decl.returnType;
+    if (!type.isAny() && type.kind != TypeKind::Void && !type.nullable) {
+        throw RuntimeError(functionLabel(function.name) + " must return " + type.name() +
+                               ", but it ended without returning a value",
+                           line, column);
     }
     return Value();
 }
@@ -838,11 +1103,16 @@ Value Interpreter::call(const Value& callee, std::vector<Value> args, int line, 
 // Operators
 
 Value Interpreter::binaryOp(TokenType op, const Value& a, const Value& b) {
+    NumOp numOp;
+    if (toNumOp(op, numOp) && a.isNumber() && b.isNumber()) return numericOp(numOp, a, b);
+
     switch (op) {
         case TokenType::Plus:
-            if (a.isInt() && b.isInt()) return Value::fromInt(checkedAdd(a.asInt(), b.asInt()));
-            if (a.isNumber() && b.isNumber()) return Value::fromFloat(a.toDouble() + b.toDouble());
-            if (a.isString() || b.isString()) return Value::fromString(toString(a) + toString(b));
+            if (a.isChar() && b.isInt()) return shiftChar(a, b, 1);
+            if (a.isInt() && b.isChar()) return shiftChar(b, a, 1);
+            if (a.isString() || b.isString() || (a.isChar() && b.isChar())) {
+                return Value::fromString(toString(a) + toString(b));
+            }
             if (a.isList() && b.isList()) {
                 std::vector<Value> items = a.asList().items;
                 const auto& more = b.asList().items;
@@ -852,49 +1122,23 @@ Value Interpreter::binaryOp(TokenType op, const Value& a, const Value& b) {
             break;
 
         case TokenType::Minus:
-            if (a.isInt() && b.isInt()) return Value::fromInt(checkedSub(a.asInt(), b.asInt()));
-            if (a.isNumber() && b.isNumber()) return Value::fromFloat(a.toDouble() - b.toDouble());
+            if (a.isChar() && b.isInt()) return shiftChar(a, b, -1);
+            if (a.isChar() && b.isChar()) {
+                return Value::fromInt(static_cast<int64_t>(a.asChar()) - static_cast<int64_t>(b.asChar()));
+            }
             break;
 
         case TokenType::Star:
-            if (a.isInt() && b.isInt()) return Value::fromInt(checkedMul(a.asInt(), b.asInt()));
-            if (a.isNumber() && b.isNumber()) return Value::fromFloat(a.toDouble() * b.toDouble());
-            if (a.isString() && b.isInt()) return Value::fromString(repeatString(a.asString(), b.asInt()));
-            if (a.isInt() && b.isString()) return Value::fromString(repeatString(b.asString(), a.asInt()));
+            if ((a.isString() || a.isChar()) && b.isInt()) return Value::fromString(repeatString(textOf(a), b));
+            if (a.isInt() && (b.isString() || b.isChar())) return Value::fromString(repeatString(textOf(b), a));
             if ((a.isList() && b.isInt()) || (a.isInt() && b.isList())) {
                 const auto& items = (a.isList() ? a : b).asList().items;
-                int64_t count = repeatCount((a.isInt() ? a : b).asInt(), items.size());
+                int64_t count = repeatCount(a.isInt() ? a : b, items.size());
                 std::vector<Value> result;
                 result.reserve(items.size() * static_cast<size_t>(count));
                 for (int64_t i = 0; i < count; ++i) result.insert(result.end(), items.begin(), items.end());
                 return Value::fromList(newList(std::move(result)));
             }
-            break;
-
-        case TokenType::Slash:
-            if (a.isNumber() && b.isNumber()) {
-                if (b.toDouble() == 0.0) throw RuntimeError("division by zero");
-                if (a.isInt() && b.isInt()) {
-                    if (a.asInt() == kIntMin && b.asInt() == -1) overflow();
-                    return Value::fromInt(a.asInt() / b.asInt());  // truncates toward zero
-                }
-                return Value::fromFloat(a.toDouble() / b.toDouble());
-            }
-            break;
-
-        case TokenType::Percent:
-            if (a.isNumber() && b.isNumber()) {
-                if (b.toDouble() == 0.0) throw RuntimeError("modulo by zero");
-                if (a.isInt() && b.isInt()) {
-                    if (b.asInt() == -1) return Value::fromInt(0);
-                    return Value::fromInt(a.asInt() % b.asInt());
-                }
-                return Value::fromFloat(std::fmod(a.toDouble(), b.toDouble()));
-            }
-            break;
-
-        case TokenType::StarStar:
-            if (a.isNumber() && b.isNumber()) return power(a, b);
             break;
 
         case TokenType::EqualEqual:
@@ -907,35 +1151,37 @@ Value Interpreter::binaryOp(TokenType op, const Value& a, const Value& b) {
         case TokenType::LessEqual:
         case TokenType::Greater:
         case TokenType::GreaterEqual: {
-            bool less;
-            bool equal;
-            if (a.isInt() && b.isInt()) {
-                less = a.asInt() < b.asInt();
-                equal = a.asInt() == b.asInt();
-            } else if (a.isNumber() && b.isNumber()) {
-                double x = a.toDouble();
-                double y = b.toDouble();
-                if (std::isnan(x) || std::isnan(y)) return Value::fromBool(false);
-                less = x < y;
-                equal = x == y;
-            } else if ((a.isString() && b.isString()) || (a.isList() && b.isList())) {
-                int order = compareValues(a, b);
-                less = order < 0;
-                equal = order == 0;
+            int order;
+            if (a.isNumber() && b.isNumber()) {
+                if ((a.isFloat() && std::isnan(a.asFloat())) || (b.isFloat() && std::isnan(b.asFloat()))) {
+                    return Value::fromBool(false);
+                }
+                order = compareNumbers(a, b);
+            } else if (((a.isString() || a.isChar()) && (b.isString() || b.isChar())) || (a.isList() && b.isList())) {
+                order = compareValues(a, b);
             } else {
                 throw RuntimeError(std::string("can't compare ") + a.typeName() + " and " + b.typeName() + " with '" +
                                    operatorSymbol(op) + "'");
             }
             switch (op) {
-                case TokenType::Less: return Value::fromBool(less);
-                case TokenType::LessEqual: return Value::fromBool(less || equal);
-                case TokenType::Greater: return Value::fromBool(!less && !equal);
-                default: return Value::fromBool(!less);
+                case TokenType::Less: return Value::fromBool(order < 0);
+                case TokenType::LessEqual: return Value::fromBool(order <= 0);
+                case TokenType::Greater: return Value::fromBool(order > 0);
+                default: return Value::fromBool(order >= 0);
             }
         }
 
         case TokenType::In:
             return Value::fromBool(contains(b, a));
+
+        case TokenType::Ampersand:
+        case TokenType::Pipe:
+            if (a.isBool() && b.isBool()) {
+                throw RuntimeError(std::string("'") + operatorSymbol(op) +
+                                   "' works on the bits of integers; for true/false use '" +
+                                   (op == TokenType::Ampersand ? "and" : "or") + "'");
+            }
+            break;
 
         default:
             break;
@@ -947,10 +1193,11 @@ Value Interpreter::binaryOp(TokenType op, const Value& a, const Value& b) {
 bool Interpreter::contains(const Value& container, const Value& item) {
     switch (container.type()) {
         case Value::Type::String:
-            if (!item.isString()) {
-                throw RuntimeError(std::string("'in <string>' needs a string on the left, not ") + item.typeName());
+            if (!item.isString() && !item.isChar()) {
+                throw RuntimeError(std::string("'in <string>' needs a string or char on the left, not ") +
+                                   item.typeName());
             }
-            return container.asString().find(item.asString()) != std::string::npos;
+            return container.asString().find(textOf(item)) != std::string::npos;
         case Value::Type::List:
             for (const Value& element : container.asList().items) {
                 if (valuesEqual(element, item)) return true;
@@ -971,7 +1218,8 @@ Value Interpreter::indexGet(const Value& object, const Value& index) {
         }
         case Value::Type::String: {
             const std::string& text = object.asString();
-            return Value::fromString(std::string(1, text[resolveIndex(index, text.size(), "string")]));
+            size_t position = utf8Offset(text, resolveIndex(index, utf8Length(text), "string"));
+            return Value::fromChar(decodeUtf8(text, position));
         }
         case Value::Type::Map: {
             const Value* value = object.asMap().find(index);
@@ -979,7 +1227,7 @@ Value Interpreter::indexGet(const Value& object, const Value& index) {
             return *value;
         }
         default:
-            throw RuntimeError(std::string("can't index into a ") + object.typeName() + " value");
+            throw RuntimeError("can't index into " + aTypeName(object) + " value");
     }
 }
 
@@ -996,7 +1244,7 @@ void Interpreter::indexSet(const Value& object, const Value& index, Value value)
         case Value::Type::String:
             throw RuntimeError("strings can't be changed in place; build a new string instead");
         default:
-            throw RuntimeError(std::string("can't set an element of a ") + object.typeName() + " value");
+            throw RuntimeError("can't set an element of " + aTypeName(object) + " value");
     }
 }
 
@@ -1005,16 +1253,17 @@ Value Interpreter::slice(const Value& object, const Value& start, const Value& e
     if (object.isList()) {
         length = object.asList().items.size();
     } else if (object.isString()) {
-        length = object.asString().size();
+        length = utf8Length(object.asString());
     } else {
-        throw RuntimeError(std::string("can't slice a ") + object.typeName() + " value");
+        throw RuntimeError("can't slice " + aTypeName(object) + " value");
     }
 
     const int64_t size = static_cast<int64_t>(length);
     auto bound = [size](const Value& value, int64_t fallback) -> int64_t {
         if (value.isNull()) return fallback;
-        if (!value.isInt()) throw RuntimeError(std::string("slice bounds must be ints, not ") + value.typeName());
-        int64_t i = value.asInt();
+        if (!value.isInt()) throw RuntimeError("slice bounds must be integers, not " + aTypeName(value));
+        int64_t i = 0;
+        if (!toInt64(value, i)) return size;  // a huge u64
         if (i < 0) i += size;
         return std::max<int64_t>(0, std::min(i, size));
     };
@@ -1022,7 +1271,10 @@ Value Interpreter::slice(const Value& object, const Value& start, const Value& e
     int64_t to = std::max(from, bound(end, size));
 
     if (object.isString()) {
-        return Value::fromString(object.asString().substr(static_cast<size_t>(from), static_cast<size_t>(to - from)));
+        const std::string& text = object.asString();
+        size_t first = utf8Offset(text, static_cast<size_t>(from));
+        size_t last = utf8Offset(text, static_cast<size_t>(to));
+        return Value::fromString(text.substr(first, last - first));
     }
     const auto& items = object.asList().items;
     return Value::fromList(newList(std::vector<Value>(items.begin() + from, items.begin() + to)));

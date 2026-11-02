@@ -1,0 +1,126 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Ascend",
+  "scopeName": "source.ascend",
+  "fileTypes": ["asc"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#numbers" },
+    { "include": "#function-declaration" },
+    { "include": "#typed-function-declaration" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#function-call" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.ascend", "match": "//.*$" },
+        { "name": "comment.block.ascend", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "escapes": {
+      "name": "constant.character.escape.ascend",
+      "match": "\\\\(u\\{[0-9a-fA-F]+\\}|x[0-9a-fA-F]{2}|[ntr0\\\\\"'{}])"
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.interpolated.ascend",
+          "begin": "\\bf\"",
+          "end": "\"",
+          "patterns": [
+            { "include": "#escapes" },
+            { "name": "constant.character.escape.ascend", "match": "\\{\\{|\\}\\}" },
+            {
+              "name": "meta.interpolation.ascend",
+              "begin": "\\{",
+              "end": "\\}",
+              "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.ascend" } },
+              "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.ascend" } },
+              "patterns": [{ "include": "$self" }]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.ascend",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "include": "#escapes" }]
+        }
+      ]
+    },
+    "chars": {
+      "name": "string.quoted.single.ascend",
+      "match": "'(?:\\\\(?:u\\{[0-9a-fA-F]+\\}|x[0-9a-fA-F]{2}|.)|[^'\\\\])'"
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.ascend", "match": "\\b0[xX][0-9a-fA-F_]+(?:[iu](?:8|16|32|64))?\\b" },
+        { "name": "constant.numeric.binary.ascend", "match": "\\b0[bB][01_]+(?:[iu](?:8|16|32|64))?\\b" },
+        { "name": "constant.numeric.octal.ascend", "match": "\\b0[oO][0-7_]+(?:[iu](?:8|16|32|64))?\\b" },
+        {
+          "name": "constant.numeric.decimal.ascend",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9]+)?(?:_?(?:[iu](?:8|16|32|64)|f32|f64))?\\b"
+        }
+      ]
+    },
+    "function-declaration": {
+      "match": "\\b(func)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.function.ascend" },
+        "2": { "name": "entity.name.function.ascend" }
+      }
+    },
+    "typed-function-declaration": {
+      "comment": "C-style function: the return type, then the name, e.g. i32 add(i32 a, i32 b)",
+      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|int|byte|f32|f64|float|bool|char|string|list|map|any|void)(\\?)?\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "storage.type.ascend" },
+        "2": { "name": "storage.type.ascend" },
+        "3": { "name": "entity.name.function.ascend" }
+      }
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.ascend",
+          "match": "\\b(if|else|while|for|in|break|continue|return|match|try|catch|throw)\\b"
+        },
+        { "name": "storage.type.function.ascend", "match": "\\bfunc\\b" },
+        { "name": "storage.modifier.ascend", "match": "\\bconst\\b" },
+        { "name": "keyword.operator.logical.ascend", "match": "\\b(and|or|not)\\b" }
+      ]
+    },
+    "types": {
+      "name": "storage.type.ascend",
+      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|int|byte|f32|f64|float|bool|char|string|list|map|any|void)\\b\\??"
+    },
+    "constants": {
+      "patterns": [
+        { "name": "constant.language.ascend", "match": "\\b(true|false|null)\\b" },
+        { "name": "support.constant.ascend", "match": "\\b(PI|E|INF|NAN|args)\\b" }
+      ]
+    },
+    "function-call": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": { "1": { "name": "entity.name.function.call.ascend" } }
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.assignment.ascend", "match": ":=|<<=|>>=|[-+*/%&|^]=" },
+        { "name": "keyword.operator.arrow.ascend", "match": "->|=>" },
+        { "name": "keyword.operator.bitwise.ascend", "match": "<<|>>" },
+        { "name": "keyword.operator.comparison.ascend", "match": "==|!=|<=|>=|<|>" },
+        { "name": "keyword.operator.logical.ascend", "match": "&&|\\|\\||!" },
+        { "name": "keyword.operator.bitwise.ascend", "match": "[&|^~]" },
+        { "name": "keyword.operator.arithmetic.ascend", "match": "\\*\\*|[-+*/%]" },
+        { "name": "keyword.operator.ascend", "match": "[=?:]" }
+      ]
+    }
+  }
+}

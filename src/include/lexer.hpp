@@ -2,6 +2,7 @@
 #define ASCEND_LEXER_HPP
 
 #include "error.hpp"
+#include "types.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -13,21 +14,28 @@ namespace ascend {
 enum class TokenType {
     // Punctuation
     LeftParen, RightParen, LeftBracket, RightBracket, LeftBrace, RightBrace,
-    Comma, Dot, Colon, Semicolon, Question,
+    Comma, Dot, Colon, Semicolon, Question, Arrow /* -> */, FatArrow /* => */,
 
     // Operators
     Plus, Minus, Star, StarStar, Slash, Percent,
+    Ampersand, Pipe, Caret, Tilde, ShiftLeft, ShiftRight,
     Equal, EqualEqual, NotEqual, Less, LessEqual, Greater, GreaterEqual,
     Declare,  // :=
     PlusEqual, MinusEqual, StarEqual, SlashEqual, PercentEqual,
+    AmpersandEqual, PipeEqual, CaretEqual, ShiftLeftEqual, ShiftRightEqual,
 
     // Literals
-    Identifier, Int, Float, String,
+    Identifier, Int, Float, String, Char,
+
+    // f"..." strings are lexed as FStringStart, then String tokens for the
+    // literal text and InterpStart <expression tokens> [FormatSpec] InterpEnd
+    // for each {...}, then FStringEnd.
+    FStringStart, FStringEnd, InterpStart, InterpEnd, FormatSpec,
 
     // Keywords. `&&`, `||` and `!` are lexed as And, Or and Not.
     And, Or, Not,
     If, Else, While, For, In, Break, Continue, Return, Func,
-    True, False, Null, Try, Catch, Throw,
+    True, False, Null, Try, Catch, Throw, Const, Match,
 
     // Structure
     Newline, Eof
@@ -35,10 +43,13 @@ enum class TokenType {
 
 struct Token {
     TokenType type = TokenType::Eof;
-    std::string lexeme;     // the exact source text of the token
-    std::string text;       // decoded contents of a string literal
-    int64_t intValue = 0;   // value of an Int literal
-    double floatValue = 0;  // value of a Float literal
+    std::string lexeme;           // the exact source text of the token
+    std::string text;             // decoded String text, or a FormatSpec
+    uint64_t intValue = 0;        // magnitude of an Int literal (range-checked by the parser)
+    double floatValue = 0;        // value of a Float literal
+    char32_t charValue = 0;       // value of a Char literal
+    NumKind numKind = NumKind::Int;  // type of a number literal (from a suffix like 10u8)
+    bool hasSuffix = false;
     int line = 1;
     int column = 1;
 };
@@ -73,10 +84,15 @@ private:
     void blockComment();
     void scanToken();
     void identifier();
-    void number();
+    void number(char first);
     void string(char quote);
+    void character();
+    void fString();
+    bool escape(char32_t& out);
+    char32_t sourceChar();
 
     void add(TokenType type);
+    void addAt(TokenType type, int line, int column, std::string lexeme);
     void emitNewline();
     void closeBracket();
     void error(int line, int column, std::string message);

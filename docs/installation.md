@@ -23,6 +23,7 @@ with Visual Studio). Builds default to the optimized `Release` configuration.
 ./build/ascend examples/fizzbuzz.asc   # run a program
 ./build/ascend                          # start the interactive REPL
 ./build/ascend -e 'print(2 ** 10)'      # run a one-liner
+./build/ascend --check my_program.asc   # find errors without running
 ```
 
 To run `ascend` from anywhere, copy `build/ascend` into a directory on your
@@ -46,3 +47,18 @@ filter them by name:
 ```
 
 To skip building the tests, configure with `-DASCEND_BUILD_TESTS=OFF`.
+
+## Continuous integration
+
+Every push to `main` and every pull request is built and tested by GitHub
+Actions (`.github/workflows/build.yml`) on Linux (GCC and Clang), macOS and
+Windows (MSVC), plus a run with AddressSanitizer and UndefinedBehaviorSanitizer.
+Each run also uploads ready-to-use interpreters for Linux, macOS and Windows:
+open the run on the repository's **Actions** tab and download them under
+**Artifacts**.
+
+## Editor support
+
+`editors/vscode` is a Visual Studio Code extension with syntax highlighting,
+bracket matching and comment toggling for `.asc` files. See its
+[README](../editors/vscode/README.md) to install it.
