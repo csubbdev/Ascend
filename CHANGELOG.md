@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.0
+
+### New
+
+- **Struct methods**: functions written inside a struct, called as
+  `value.method()`, get the value as `this`. An `init()` method runs whenever
+  a value is made.
+- **Lambdas**: `x => x * 2`, `(a, b) => a + b`, `(i32 n) => { ... }`.
+- **Comprehensions**: `[x * x for x in xs if x > 0]`, with several `for` and
+  `if` clauses, and map comprehensions `{k: v for k, v in m}`.
+- **Destructuring**: `a, b := 1, 2`, `a, b = b, a`, `low, high := minmax(xs)`
+  (with `return a, b`), and `x, y := point` for structs.
+- **Ranges**: `0..10` and `1..=10` (also for chars: `'a'..='z'`), usable in
+  `for` loops and `in` tests without building a list, and as `switch` cases
+  and `match` patterns: `case 90..=100:`.
+- **Null-safe operators**: `a ?? b` and `a?.b` / `a?.method()`.
+- **Named arguments**: `greet("Ada", mark: "?")`, `Box(height: 2)`.
+- **Variadic functions**: `i32 sum(i32 ...numbers)`, and `...list` to spread
+  a list into a call's arguments or another list, or a map into a map.
+- **`finally`** blocks, which run however a `try` ends; `try` can also be used
+  with only `finally`.
+- **Raw strings** `r"\d+"` and **multi-line strings** `"""..."""`.
+- New builtins: `group_by`, `count_by`, `chunk`, `flat_map`, `min_by`,
+  `max_by`, `mean`, `median`.
+
 ## 0.5.0
 
 ### New

@@ -46,7 +46,9 @@ public:
     void execute(std::unique_ptr<Program> program, std::unique_ptr<SourceFile> source = nullptr);
 
     // Calls an Ascend or builtin function. `line`/`column` locate errors.
-    Value call(const Value& callee, std::vector<Value> args, int line = 0, int column = 0);
+    // `named` holds arguments given by name: f(1, size: 2).
+    Value call(const Value& callee, std::vector<Value> args, int line = 0, int column = 0,
+               const std::vector<std::pair<std::string, Value>>* named = nullptr);
 
     // Runs another Ascend file (once) and returns its top-level names as a
     // map. Relative paths are relative to the file that is running.
@@ -114,7 +116,10 @@ private:
     Flow execSwitch(const SwitchStmt& stmt, const EnvPtr& env);
     Flow execImport(const ImportStmt& stmt, const EnvPtr& env);
     Flow execEnum(const EnumStmt& stmt, const EnvPtr& env);
+    Flow execMultiAssign(const MultiAssignStmt& stmt, const EnvPtr& env);
+    void assignTo(const Expr& target, Value value, const EnvPtr& env);
     Flow execTry(const TryStmt& stmt, const EnvPtr& env);
+    Flow execTryCatch(const TryStmt& stmt, const EnvPtr& env);
     Flow execMatch(const MatchStmt& stmt, const EnvPtr& env);
     Flow execReturn(const ReturnStmt& stmt, const EnvPtr& env);
     void hoistFunctions(const Block& block, const EnvPtr& env);
@@ -127,8 +132,13 @@ private:
     Value evalMember(const MemberExpr& expr, const EnvPtr& env);
     Value evalFString(const FStringExpr& expr, const EnvPtr& env);
     Value evalIncDec(const IncDecExpr& expr, const EnvPtr& env);
+    Value evalComprehension(const ComprehensionExpr& expr, const EnvPtr& env);
+    Value evalRange(const RangeExpr& expr, const EnvPtr& env);
+    bool inRange(const Value& value, const RangeExpr& range, const EnvPtr& env);
+    bool matchesPattern(const Value& subject, const Expr& pattern, const EnvPtr& env);
     Value makeStruct(const StructStmt& stmt, const EnvPtr& env);
-    Value constructStruct(StructType& type, std::vector<Value> args, int line, int column);
+    Value constructStruct(const std::shared_ptr<StructType>& type, std::vector<Value> args, int line, int column,
+                          const std::vector<std::pair<std::string, Value>>* named = nullptr);
     Value makeFunction(const FunctionExpr& expr, const EnvPtr& env, const std::string& name);
     void indexSet(const Value& object, const Value& index, Value value);
 

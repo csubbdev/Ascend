@@ -188,6 +188,17 @@ void Lexer::scanToken() {
         fString();
         return;
     }
+    if (c == 'r' && peek() == '"') {  // r"raw: \d+ stays as written"
+        advance();
+        if (peek() == '"' && peek(1) == '"') {
+            advance();
+            advance();
+            longString(true);
+        } else {
+            rawString();
+        }
+        return;
+    }
     if (isIdentifierStart(c)) {
         identifier();
         return;
@@ -205,9 +216,28 @@ void Lexer::scanToken() {
         case '{': brackets_.push_back('{'); add(TokenType::LeftBrace); return;
         case '}': closeBracket(); add(TokenType::RightBrace); return;
         case ',': add(TokenType::Comma); return;
-        case '.': add(TokenType::Dot); return;
+        case '.':
+            if (match('.')) {
+                if (match('.')) {
+                    add(TokenType::Ellipsis);
+                } else {
+                    add(match('=') ? TokenType::DotDotEqual : TokenType::DotDot);
+                }
+            } else {
+                add(TokenType::Dot);
+            }
+            return;
         case ';': add(TokenType::Semicolon); return;
-        case '?': add(TokenType::Question); return;
+        case '?':
+            if (match('?')) {
+                add(TokenType::QuestionQuestion);
+            } else if (peek() == '.' && isIdentifierStart(peek(1))) {
+                advance();
+                add(TokenType::QuestionDot);
+            } else {
+                add(TokenType::Question);
+            }
+            return;
         case '~': add(TokenType::Tilde); return;
         case ':': add(match('=') ? TokenType::Declare : TokenType::Colon); return;
         case '+':
@@ -273,7 +303,13 @@ void Lexer::scanToken() {
             }
             return;
         case '"':
-            string(c);
+            if (peek() == '"' && peek(1) == '"') {
+                advance();
+                advance();
+                longString(false);
+            } else {
+                string(c);
+            }
             return;
         case '\'':
             character();
@@ -487,6 +523,57 @@ void Lexer::string(char quote) {
             advance();
             char32_t escaped;
             if (escape(escaped)) appendUtf8(value, escaped);
+            continue;
+        }
+        value += advance();
+    }
+    add(TokenType::String);
+    tokens_.back().text = std::move(value);
+}
+
+// r"C:\temp\new" : backslashes are kept as written (handy for regular expressions).
+void Lexer::rawString() {
+    std::string value;
+    while (true) {
+        if (atEnd() || peek() == '\n') {
+            error(startLine_, startColumn_, "unterminated raw string (missing closing \")");
+            return;
+        }
+        if (peek() == '"') {
+            advance();
+            break;
+        }
+        value += advance();
+    }
+    add(TokenType::String);
+    tokens_.back().text = std::move(value);
+}
+
+// """text that can span
+// several lines"""   (a newline right after the opening quotes is skipped)
+void Lexer::longString(bool raw) {
+    std::string value;
+    if (peek() == '\r' && peek(1) == '\n') advance();
+    if (peek() == '\n') advance();
+    while (true) {
+        if (atEnd()) {
+            error(startLine_, startColumn_, "unterminated string (missing closing \"\"\")");
+            return;
+        }
+        if (peek() == '"' && peek(1) == '"' && peek(2) == '"') {
+            advance();
+            advance();
+            advance();
+            break;
+        }
+        if (peek() == '\\' && !raw) {
+            advance();
+            char32_t escaped;
+            if (escape(escaped)) appendUtf8(value, escaped);
+            continue;
+        }
+        if (peek() == '\r' && peek(1) == '\n') {
+            advance();  // keep \n line endings only
             continue;
         }
         value += advance();

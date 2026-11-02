@@ -247,7 +247,7 @@ std::string padText(const Args& args, const char* fn, bool left) {
 
 // Structs always have all their fields, and enums never change.
 void checkResizable(const MapObj& map, const char* fn) {
-    if (map.structInfo) throw RuntimeError(std::string(fn) + "() can't remove fields from a " + map.structInfo->name);
+    if (map.structInfo()) throw RuntimeError(std::string(fn) + "() can't remove fields from a " + map.structInfo()->name);
     if (!map.frozenAs.empty()) throw RuntimeError(std::string(fn) + "(): the members of " + map.frozenAs + " can't be changed");
 }
 
@@ -709,6 +709,87 @@ void registerCollections(Interpreter& interp) {
         return Value::fromList(in.newList(std::move(items)));
     });
 
+    interp.defineNative("count_by", 2, 2, [](Interpreter& in, Args& args) {
+        std::vector<Value> items = listArg(args, 0, "count_by").items;
+        const Value& key = functionArg(args, 1, "count_by");
+        auto counts = in.newMap();
+        for (const Value& item : items) {
+            Value group = in.call(key, {item});
+            Value* existing = counts->find(group);
+            if (existing != nullptr) {
+                *existing = Value::fromInt(existing->asInt() + 1);
+            } else {
+                counts->set(group, Value::fromInt(1));
+            }
+        }
+        return Value::fromMap(counts);
+    });
+
+    interp.defineNative("group_by", 2, 2, [](Interpreter& in, Args& args) {
+        std::vector<Value> items = listArg(args, 0, "group_by").items;
+        const Value& key = functionArg(args, 1, "group_by");
+        auto groups = in.newMap();
+        for (const Value& item : items) {
+            Value group = in.call(key, {item});
+            Value* existing = groups->find(group);
+            if (existing != nullptr) {
+                existing->asList().items.push_back(item);
+            } else {
+                groups->set(group, Value::fromList(in.newList({item})));
+            }
+        }
+        return Value::fromMap(groups);
+    });
+
+    interp.defineNative("chunk", 2, 2, [](Interpreter& in, Args& args) {
+        std::vector<Value> items = listArg(args, 0, "chunk").items;
+        int64_t size = intArg(args, 1, "chunk");
+        if (size < 1) throw RuntimeError("chunk() size must be at least 1");
+        std::vector<Value> chunks;
+        for (size_t i = 0; i < items.size(); i += static_cast<size_t>(size)) {
+            size_t end = std::min(items.size(), i + static_cast<size_t>(size));
+            chunks.push_back(Value::fromList(in.newList(std::vector<Value>(items.begin() + static_cast<std::ptrdiff_t>(i),
+                                                                           items.begin() + static_cast<std::ptrdiff_t>(end)))));
+        }
+        return Value::fromList(in.newList(std::move(chunks)));
+    });
+
+    interp.defineNative("flat_map", 2, 2, [](Interpreter& in, Args& args) {
+        std::vector<Value> items = listArg(args, 0, "flat_map").items;
+        const Value& fn = functionArg(args, 1, "flat_map");
+        std::vector<Value> result;
+        for (const Value& item : items) {
+            Value mapped = in.call(fn, {item});
+            if (mapped.isList()) {
+                const auto& inner = mapped.asList().items;
+                result.insert(result.end(), inner.begin(), inner.end());
+            } else {
+                result.push_back(std::move(mapped));
+            }
+        }
+        return Value::fromList(in.newList(std::move(result)));
+    });
+
+    auto extremeBy = [](const char* name, int sign) {
+        return [name, sign](Interpreter& in, Args& args) {
+            std::vector<Value> items = listArg(args, 0, name).items;
+            const Value& key = functionArg(args, 1, name);
+            if (items.empty()) throw RuntimeError(std::string(name) + "() of an empty list");
+            Value best = items[0];
+            Value bestKey = in.call(key, {best});
+            for (size_t i = 1; i < items.size(); ++i) {
+                Value candidate = in.call(key, {items[i]});
+                if (compareValues(candidate, bestKey) * sign > 0) {
+                    best = items[i];
+                    bestKey = std::move(candidate);
+                }
+            }
+            return best;
+        };
+    };
+    interp.defineNative("min_by", 2, 2, extremeBy("min_by", -1));
+    interp.defineNative("max_by", 2, 2, extremeBy("max_by", 1));
+
     interp.defineNative("unique", 1, 1, [](Interpreter& in, Args& args) {
         std::vector<Value> result;
         for (const Value& item : listArg(args, 0, "unique").items) {
@@ -800,7 +881,7 @@ void registerCollections(Interpreter& interp) {
         if (args[0].isMap()) {
             auto copy = in.newMap();
             for (const auto& entry : args[0].asMap().entries) copy->set(entry.first, entry.second);
-            copy->structInfo = args[0].asMap().structInfo;  // a copy of a struct is the same kind of struct
+            copy->structType = args[0].asMap().structType;  // a copy of a struct is the same kind of struct
             return Value::fromMap(copy);
         }
         return args[0];
@@ -1055,6 +1136,36 @@ void registerMath(Interpreter& interp) {
             total = in.binaryOp(TokenType::Plus, total, widened);
         }
         return total;
+    });
+
+    // The numbers of a list as doubles, for mean() and median().
+    auto numbers = [](const Args& args, const char* name) {
+        const auto& items = listArg(args, 0, name).items;
+        if (items.empty()) throw RuntimeError(std::string(name) + "() of an empty list");
+        std::vector<double> values;
+        values.reserve(items.size());
+        for (const Value& item : items) {
+            if (!item.isNumber()) {
+                throw RuntimeError(std::string(name) + "() needs a list of numbers, but it contains " + article(item));
+            }
+            values.push_back(item.toDouble());
+        }
+        return values;
+    };
+
+    interp.defineNative("mean", 1, 1, [numbers](Interpreter&, Args& args) {
+        std::vector<double> values = numbers(args, "mean");
+        double total = 0;
+        for (double value : values) total += value;
+        return Value::fromFloat(total / static_cast<double>(values.size()));
+    });
+
+    interp.defineNative("median", 1, 1, [numbers](Interpreter&, Args& args) {
+        std::vector<double> values = numbers(args, "median");
+        std::sort(values.begin(), values.end());
+        size_t middle = values.size() / 2;
+        double result = values.size() % 2 == 1 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+        return Value::fromFloat(result);
     });
 
     interp.defineNative("sign", 1, 1, [](Interpreter&, Args& args) {

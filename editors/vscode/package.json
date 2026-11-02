@@ -2,7 +2,7 @@
   "name": "ascend-language",
   "displayName": "Ascend",
   "description": "Syntax highlighting for the Ascend programming language",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "ascend",
   "license": "Apache-2.0",
   "engines": {

@@ -52,6 +52,17 @@ Several variables of one type can be declared together, like in C:
 `auto` declares a variable whose type is taken from its first value, like
 C++: after `auto total = 0`, `total` only holds ints.
 
+### Several at once
+
+```
+a, b := 1, 2            // declare several variables
+a, b = b, a             // swap: all the values are worked out first
+low, high := minmax(xs) // unpack a list (a function can `return a, b`)
+x, y := point           // unpack a struct's fields, in order
+```
+
+The number of names must match the number of values.
+
 A typed variable only ever holds values of its type. Numbers convert
 automatically when nothing is lost; anything else is an error:
 
@@ -152,11 +163,13 @@ From lowest to highest precedence:
 | Operators                       | Meaning |
 |---------------------------------|---------|
 | `a ? b : c`                     | conditional expression |
+| `a ?? b`                        | `a`, or `b` if `a` is null |
 | `or`, `\|\|`                    | logical or (short-circuit) |
 | `and`, `&&`                     | logical and (short-circuit) |
 | `not`, `!`                      | logical not |
 | `==`, `!=`                      | equality (deep for lists and maps; `1 == 1.0`) |
-| `<`, `<=`, `>`, `>=`, `in`      | comparison; `x in list`, `key in map`, `"sub" in string` |
+| `<`, `<=`, `>`, `>=`, `in`      | comparison; `x in list`, `key in map`, `"sub" in string`, `x in 1..10` |
+| `a..b`, `a..=b`                 | range: the numbers (or chars) from `a` up to `b`, without or with `b` |
 | `\|`                            | bitwise or |
 | `^`                             | bitwise xor |
 | `&`                             | bitwise and |
@@ -165,7 +178,7 @@ From lowest to highest precedence:
 | `*`, `/`, `%`                   | multiply, divide, remainder |
 | `-x`, `~x`, `++x`, `--x`, `(type) x` | negation, bitwise not, increment, decrement, cast |
 | `**`                            | power (right associative, `-2 ** 2 == -4`) |
-| `f(x)`, `a[i]`, `a[i:j]`, `m.k`, `x++`, `x--` | call, index, slice, field, increment, decrement |
+| `f(x)`, `a[i]`, `a[i:j]`, `m.k`, `m?.k`, `x++`, `x--` | call, index, slice, field, optional field, increment, decrement |
 
 Notes:
 
@@ -184,6 +197,11 @@ Notes:
 - `+` with a string on either side converts the other side to a string:
   `"total: " + 5`.
 - `"ab" * 3` repeats a string; `[0] * 3` repeats a list; `[1] + [2]` joins lists.
+- `a?.b` is `null` when `a` is null, instead of an error; `a?.f()` doesn't
+  call `f` then. Combine it with `??` for a default: `user?.name ?? "guest"`.
+- `0..5` is the list `[0, 1, 2, 3, 4]` and `1..=3` is `[1, 2, 3]`;
+  `'a'..='e'` gives chars. In a `for` loop, `in` test, `switch` case or
+  `match` pattern no list is made, so `for i in 0..1_000_000_000` is fine.
 
 ## Strings and chars
 
@@ -200,6 +218,19 @@ s[1:3]       // "él"
 
 Escapes: `\n \t \r \0 \\ \" \' \{ \}`, `\xHH` (a character code in hex) and
 `\u{1F600}` (any Unicode character).
+
+Raw strings keep backslashes as they are, which is handy for regular
+expressions and Windows paths: `r"\d+-\d+"`, `r"C:\temp"`.
+
+Triple quotes make a string that can span several lines (a newline right
+after the opening quotes is left out). Add `r` in front to make it raw too.
+
+```
+usage := """
+Usage: tool [options]
+  -h   show "help"
+"""
+```
 
 Chars support a little arithmetic: `'a' + 1 == 'b'`, `'z' - 'a' == 25`,
 `'-' * 3 == "---"`. A char equals the one-character string holding it
@@ -241,6 +272,23 @@ In a map literal, a bare name before `:` is a string key (`{name: 1}` is
 `{"name": 1}`). Put an expression in parentheses to use its value as the key:
 `{(key): 1}`. Keys may be strings, numbers, chars, bools or `null`.
 
+`...` spreads one list into another, or one map into another (later keys
+win): `[0, ...items, 99]`, `{...defaults, size: 2}`.
+
+### Comprehensions
+
+A comprehension builds a list or map with a loop in one expression:
+
+```
+squares := [x * x for x in 1..=10]
+evens := [x for x in numbers if x % 2 == 0]
+pairs := [[a, b] for a in 1..3 for b in "xy"]     // nested loops
+lengths := {word: len(word) for word in words}     // a map
+doubled := {k: v * 2 for k, v in prices if v > 0}
+```
+
+The loop variables only exist inside the comprehension.
+
 Reading a missing map key or an out-of-range index is an error. Use
 `get(map, key, default)` when a key may be missing.
 
@@ -265,6 +313,8 @@ while n > 0 {
 }
 
 for i in range(5) { }            // 0, 1, 2, 3, 4
+for i in 0..5 { }                // the same
+for i in 1..=5 { }               // 1, 2, 3, 4, 5
 for i in range(2, 10, 2) { }     // 2, 4, 6, 8
 for item in items { }
 for i, item in items { }         // index and item
@@ -341,6 +391,9 @@ default:
 `break` inside a switch leaves the switch; `continue` goes to the loop around
 it. For a version without fall-through, see `match` below.
 
+A case can also be a range: `case 90..=100:` matches any number from 90 to
+100 (and so can a `match` pattern).
+
 ### match
 
 `match` runs the first arm whose value equals the subject:
@@ -407,6 +460,53 @@ func add(a, b) {
   the list (`int main(int argc, list argv)`). If it returns an integer, that's
   the program's exit code.
 - Functions are closures: they keep access to the variables around them.
+- `return a, b` returns the list `[a, b]`, which the caller can unpack:
+  `low, high := minmax(xs)`.
+
+### Lambdas
+
+Short anonymous functions, handy with `map`, `filter` and `sort`:
+
+```
+double := x => x * 2
+add := (a, b) => a + b
+square := (i32 n) => n * n            // parameters can have types
+greet := () => { print("hi") }        // a { block } body for statements
+
+map(prices, p => p * 1.2)
+sort(people, p => p.age)
+```
+
+### Named arguments
+
+Arguments can be given by name after the positional ones, in any order. This
+is most useful for parameters with defaults:
+
+```
+string label(string text, i32 width = 10, char fill = ' ') { ... }
+
+label("total", fill: '.')
+label(width: 4, text: "id")
+Box(height: 2)                        // struct fields too
+```
+
+### Any number of arguments
+
+A last parameter written `...name` collects the remaining arguments in a
+list; with a type, each one must have that type. In a call, `...list`
+passes a list's items as separate arguments.
+
+```
+i32 sum(i32 ...numbers) {
+    i32 total = 0
+    for (n in numbers) total += n
+    return total
+}
+
+sum()               // 0
+sum(1, 2, 3)        // 6
+sum(...[4, 5], 6)   // 15
+```
 
 ```
 func makeCounter() {
@@ -466,8 +566,35 @@ type(p)                       // "Point"
 - Two struct values are equal when they're the same struct with equal fields.
 - Structs are references, like maps; `copy(p)` makes a (shallow) copy.
 - Structs can be used before their declaration, like functions.
-- Functions that take a struct first can be called like methods:
-  `f64 area(Rect r) { ... }` can be called as `r.area()`.
+- Arguments can be given by name: `Rect(width: 3, height: 2)`.
+
+### Methods
+
+Functions written inside a struct are its methods. They get the value they're
+called on as `this`:
+
+```
+struct Counter {
+    i32 count = 0
+    string name = "counter"
+
+    void add(i32 n = 1) { this.count += n }
+    bool done() { return this.count >= 10 }
+    func label() { return f"{this.name}: {this.count}" }
+
+    // init() runs whenever a Counter is made, e.g. to check its fields.
+    void init() { assert(this.count >= 0, "count can't be negative") }
+}
+
+c := Counter()
+c.add(3)
+print(c.label())    // counter: 3
+```
+
+Methods can have a return type (`bool done()`), `func`, or nothing in front
+of their name. A function outside the struct that takes it as its first
+parameter can be called the same way: `f64 area(Rect r)` can be called as
+`r.area()`.
 
 ## Enums
 
@@ -525,13 +652,21 @@ script.asc:2:9: runtime error: division by zero
 ```
 
 They can be caught with `try`/`catch`. The error variable holds the error
-message (or the value given to `throw`):
+message (or the value given to `throw`). A `finally` block runs however the
+`try` ends: normally, with an error, or with `return`/`break`.
 
 ```
 try {
     risky()
 } catch e {            // also: catch (e) { }   or just: catch { }
     print("failed:", e)
+}
+
+try {
+    file := open_things()
+    use(file)
+} finally {
+    close_things()       // runs even if use() fails; the error still goes on
 }
 
 throw "something went wrong"

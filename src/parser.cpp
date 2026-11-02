@@ -28,7 +28,30 @@ bool isAssignmentOperator(TokenType type) {
 }
 
 bool isAssignable(const Expr& expr) {
-    return expr.kind == ExprKind::Variable || expr.kind == ExprKind::Index || expr.kind == ExprKind::Member;
+    if (expr.kind == ExprKind::Member) return !expr.as<MemberExpr>().optional;
+    return expr.kind == ExprKind::Variable || expr.kind == ExprKind::Index;
+}
+
+// Sets a flag for the rest of a scope, and restores it even when a syntax
+// error unwinds the parser.
+class FlagGuard {
+public:
+    FlagGuard(bool& flag, bool value) : flag_(flag), saved_(flag) { flag_ = value; }
+    ~FlagGuard() { flag_ = saved_; }
+    FlagGuard(const FlagGuard&) = delete;
+    FlagGuard& operator=(const FlagGuard&) = delete;
+
+private:
+    bool& flag_;
+    bool saved_;
+};
+
+// Gives a method its first parameter, the value it's called on.
+void addThisParameter(FunctionExpr& method) {
+    Param self;
+    self.name = "this";
+    method.params.insert(method.params.begin(), std::move(self));
+    ++method.requiredParams;
 }
 
 // Tokens that continue an expression after a closing parenthesis. Anything
@@ -292,8 +315,40 @@ StmtPtr Parser::statement() {
 }
 
 // Expression statements, declarations (x := 1) and assignments (x = 1, x += 1).
-StmtPtr Parser::simpleStatement(bool requireEnd) {
+StmtPtr Parser::simpleStatement(bool requireEnd, bool allowMulti) {
     ExprPtr expr = expression();
+
+    // a, b := pair      a, b = b, a
+    if (allowMulti && check(TokenType::Comma)) {
+        auto stmt = std::make_unique<MultiAssignStmt>(expr->line, expr->column);
+        stmt->targets.push_back(std::move(expr));
+        while (match(TokenType::Comma)) stmt->targets.push_back(expression());
+        if (match(TokenType::Declare)) {
+            stmt->declare = true;
+            for (const auto& target : stmt->targets) {
+                if (target->kind != ExprKind::Variable) {
+                    error(peek(), "':=' can only declare plain variable names (use '=' to change elements or fields)");
+                }
+            }
+        } else if (match(TokenType::Equal)) {
+            for (const auto& target : stmt->targets) {
+                if (!isAssignable(*target)) error(previous(), "can't assign to one of these expressions");
+            }
+        } else {
+            error(peek(), "expected '=' or ':=' after the variables, found " + describeToken(peek()));
+        }
+        const Token& start = peek();
+        skipNewlines();
+        do {
+            stmt->values.push_back(expression());
+        } while (match(TokenType::Comma));
+        if (stmt->values.size() != 1 && stmt->values.size() != stmt->targets.size()) {
+            error(start, "there are " + std::to_string(stmt->targets.size()) + " variables but " +
+                             std::to_string(stmt->values.size()) + " values");
+        }
+        if (requireEnd) expectStatementEnd();
+        return stmt;
+    }
 
     if (check(TokenType::Declare)) {
         const Token& op = advance();
@@ -447,7 +502,7 @@ std::vector<StmtPtr> Parser::forClauses() {
         size_t length = typeLength(0, true);
         bool declaration = (isWord(0, "auto") && peek(1).type == TokenType::Identifier) ||
                            (length > 0 && peek(length).type == TokenType::Identifier);
-        clauses.push_back(declaration ? typedDeclaration(false) : simpleStatement(false));
+        clauses.push_back(declaration ? typedDeclaration(false) : simpleStatement(false, false));
     } while (match(TokenType::Comma));
     return clauses;
 }
@@ -594,19 +649,33 @@ StmtPtr Parser::structDeclaration(const Token& keyword) {
         if (check(TokenType::RightBrace) || isAtEnd()) break;
         size_t start = current_;
         try {
-            TypeSpec type;
-            std::string typeText = "func";
+            // Methods: `f64 area() { ... }`, `func describe() { ... }` or `reset() { ... }`.
             size_t length = typeLength(0, true);
-            if (length > 0 && peek(length).type == TokenType::Identifier) {
-                typeText = peek().lexeme;
-                type = parseType(false);
+            bool typedMethod = !check(TokenType::Func) && length > 0 && peek(length).type == TokenType::Identifier &&
+                               peek(length + 1).type == TokenType::LeftParen;
+            bool untypedMethod = (check(TokenType::Func) && peek(1).type == TokenType::Identifier &&
+                                  peek(2).type == TokenType::LeftParen) ||
+                                 (check(TokenType::Identifier) && peek(1).type == TokenType::LeftParen);
+            if (typedMethod || untypedMethod) {
+                TypeSpec returnType;
+                if (typedMethod) {
+                    returnType = parseType(true);
+                } else {
+                    match(TokenType::Func);
+                }
+                const Token& name = advance();
+                auto method = functionRest(name, stmt->name + "." + name.lexeme, typedMethod ? &returnType : nullptr);
+                addThisParameter(*method);
+                stmt->methods.emplace_back(name.lexeme, std::move(method));
+                continue;
             }
+
+            TypeSpec type;
+            if (length > 0 && peek(length).type == TokenType::Identifier) type = parseType(false);
             do {
                 const Token& name = consume(TokenType::Identifier, "a field name");
                 if (check(TokenType::LeftParen)) {
-                    error(peek(), "a struct can't contain functions; write it after the struct, like '" + typeText + " " +
-                                      name.lexeme + "(" + stmt->name + " self) { ... }', and call it as value." +
-                                      name.lexeme + "()");
+                    error(peek(), "a method needs its own line: '" + type.name() + " " + name.lexeme + "() { ... }'");
                 }
                 if (check(TokenType::Colon)) {
                     error(peek(), "write the field's type before its name, like 'f64 " + name.lexeme + "'");
@@ -674,6 +743,12 @@ StmtPtr Parser::returnStatement(const Token& keyword) {
     if (!check(TokenType::Newline) && !check(TokenType::Semicolon) && !check(TokenType::RightBrace) &&
         !check(TokenType::Else) && !isAtEnd()) {
         stmt->value = expression();
+        if (check(TokenType::Comma)) {  // return a, b  returns the list [a, b]
+            auto list = std::make_unique<ListExpr>(stmt->value->line, stmt->value->column);
+            list->elements.push_back(std::move(stmt->value));
+            while (match(TokenType::Comma)) list->elements.push_back(expression());
+            stmt->value = std::move(list);
+        }
     }
     expectStatementEnd();
     return stmt;
@@ -682,18 +757,28 @@ StmtPtr Parser::returnStatement(const Token& keyword) {
 StmtPtr Parser::tryStatement(const Token& keyword) {
     auto stmt = nodeAt<TryStmt>(keyword);
     stmt->body = block("'try' body");
-    if (peekPastNewlines().type != TokenType::Catch) {
-        error(peekPastNewlines(), "expected 'catch' after the 'try' block, found " + describeToken(peekPastNewlines()));
+    if (peekPastNewlines().type == TokenType::Catch) {
+        skipNewlines();
+        advance();  // catch
+        stmt->hasCatch = true;
+        if (match(TokenType::LeftParen)) {
+            stmt->errorName = consume(TokenType::Identifier, "an error variable name").lexeme;
+            consume(TokenType::RightParen, "')' after the error variable name");
+        } else if (check(TokenType::Identifier)) {
+            stmt->errorName = advance().lexeme;
+        }
+        stmt->handler = block("'catch' body");
     }
-    skipNewlines();
-    advance();  // catch
-    if (match(TokenType::LeftParen)) {
-        stmt->errorName = consume(TokenType::Identifier, "an error variable name").lexeme;
-        consume(TokenType::RightParen, "')' after the error variable name");
-    } else if (check(TokenType::Identifier)) {
-        stmt->errorName = advance().lexeme;
+    const Token& after = peekPastNewlines();
+    if (after.type == TokenType::Identifier && after.lexeme == "finally") {
+        skipNewlines();
+        advance();
+        stmt->hasFinally = true;
+        stmt->finallyBody = block("'finally' body");
     }
-    stmt->handler = block("'catch' body");
+    if (!stmt->hasCatch && !stmt->hasFinally) {
+        error(after, "expected 'catch' or 'finally' after the 'try' block, found " + describeToken(after));
+    }
     return stmt;
 }
 
@@ -844,6 +929,8 @@ StmtPtr Parser::matchStatement(const Token& keyword) {
                 if (sawDefault) error(defaultToken, "a match can only have one default ('else') arm");
                 sawDefault = true;
             } else {
+                // `x => ...` here is a pattern and its arm, not a lambda.
+                FlagGuard patterns(noLambda_, true);
                 do {
                     arm.patterns.push_back(expression());
                 } while (match(TokenType::Comma));
@@ -916,16 +1003,42 @@ std::unique_ptr<FunctionExpr> Parser::functionRest(const Token& keyword, const s
     function->name = name;
     if (returnType != nullptr) function->returnType = *returnType;
     consume(TokenType::LeftParen, name.empty() ? "'(' after 'func'" : "'(' after the function name");
+    parameters(*function);
+    if (check(TokenType::Arrow)) {
+        if (returnType != nullptr) error(peek(), "the return type is already written before the function name");
+        advance();
+        function->returnType = parseType(true);
+    }
+    function->body = block("function body");
+    return function;
+}
+
+// The parameters after '(' up to and including ')'. A typed parameter is
+// written C style, `i32 count`; `...rest` collects any further arguments.
+void Parser::parameters(FunctionExpr& function) {
     bool sawDefault = false;
     while (!check(TokenType::RightParen)) {
         Param parameter;
         size_t length = typeLength(0, true);
-        if (length > 0 && peek(length).type == TokenType::Identifier) parameter.type = parseType(false);
+        if (length > 0 && (peek(length).type == TokenType::Identifier || peek(length).type == TokenType::Ellipsis)) {
+            parameter.type = parseType(false);
+        }
+        bool rest = match(TokenType::Ellipsis);
         const Token& param = consume(TokenType::Identifier, "a parameter name");
         parameter.name = param.lexeme;
         if (check(TokenType::Colon)) {
             std::string type = typeLength(1) > 0 ? peek(1).lexeme : "i32";
             error(peek(), "write the parameter's type before its name, like '" + type + " " + param.lexeme + "'");
+        }
+        if (rest) {
+            if (check(TokenType::Equal)) error(peek(), "'..." + param.lexeme + "' can't have a default value");
+            function.variadic = true;
+            function.params.push_back(std::move(parameter));
+            match(TokenType::Comma);
+            if (!check(TokenType::RightParen)) {
+                error(peek(), "'..." + param.lexeme + "' collects the remaining arguments, so it must be the last parameter");
+            }
+            break;
         }
         if (match(TokenType::Equal)) {
             parameter.defaultValue = expression();
@@ -933,18 +1046,38 @@ std::unique_ptr<FunctionExpr> Parser::functionRest(const Token& keyword, const s
         } else if (sawDefault) {
             error(param, "parameter '" + param.lexeme + "' needs a default value because an earlier parameter has one");
         } else {
-            ++function->requiredParams;
+            ++function.requiredParams;
         }
-        function->params.push_back(std::move(parameter));
+        function.params.push_back(std::move(parameter));
         if (!match(TokenType::Comma)) break;
     }
     consume(TokenType::RightParen, "')' after the parameters");
-    if (check(TokenType::Arrow)) {
-        if (returnType != nullptr) error(peek(), "the return type is already written before the function name");
-        advance();
-        function->returnType = parseType(true);
+}
+
+// x => x * 2      (a, b) => a + b      (i32 n) => { return n * n }
+ExprPtr Parser::lambda(const Token& start, bool parenthesized) {
+    auto function = nodeAt<FunctionExpr>(start);
+    ++functionCount_;
+    NestingGuard guard(*this, start);
+    if (parenthesized) {
+        advance();  // (
+        parameters(*function);
+    } else {
+        Param parameter;
+        parameter.name = advance().lexeme;
+        function->params.push_back(std::move(parameter));
+        function->requiredParams = 1;
     }
-    function->body = block("function body");
+    consume(TokenType::FatArrow, "'=>' after the lambda's parameters");
+    FlagGuard lambdas(noLambda_, false);
+    if (check(TokenType::LeftBrace)) {
+        function->body = block("lambda body");
+    } else {
+        skipNewlines();
+        auto result = std::make_unique<ReturnStmt>(peek().line, peek().column);
+        result->value = expression();
+        function->body.statements.push_back(std::move(result));
+    }
     return function;
 }
 
@@ -1118,7 +1251,7 @@ ExprPtr Parser::expression() {
 }
 
 ExprPtr Parser::ternary() {
-    ExprPtr condition = logicOr();
+    ExprPtr condition = nullish();
     if (!check(TokenType::Question)) return condition;
     const Token& question = advance();
     auto expr = nodeAt<TernaryExpr>(question);
@@ -1133,6 +1266,21 @@ ExprPtr Parser::ternary() {
     expr->elseExpr = ternary();
     expr->condition = std::move(condition);
     return expr;
+}
+
+// a ?? b: a, unless it's null.
+ExprPtr Parser::nullish() {
+    ExprPtr left = logicOr();
+    while (check(TokenType::QuestionQuestion)) {
+        const Token& op = advance();
+        skipNewlines();
+        auto expr = nodeAt<LogicalExpr>(op);
+        expr->op = TokenType::QuestionQuestion;
+        expr->left = std::move(left);
+        expr->right = logicOr();
+        left = std::move(expr);
+    }
+    return left;
 }
 
 ExprPtr Parser::logicOr() {
@@ -1194,8 +1342,22 @@ ExprPtr Parser::equality() {
 }
 
 ExprPtr Parser::comparison() {
-    return binary(&Parser::bitOr, {TokenType::Less, TokenType::LessEqual, TokenType::Greater,
+    return binary(&Parser::range, {TokenType::Less, TokenType::LessEqual, TokenType::Greater,
                                    TokenType::GreaterEqual, TokenType::In});
+}
+
+// 0..10 (10 not included) and 1..=10 (included). Binds looser than
+// arithmetic, so 0..n + 1 is 0..(n + 1).
+ExprPtr Parser::range() {
+    ExprPtr start = bitOr();
+    if (!check(TokenType::DotDot) && !check(TokenType::DotDotEqual)) return start;
+    const Token& op = advance();
+    skipNewlines();
+    auto expr = nodeAt<RangeExpr>(op);
+    expr->inclusive = op.type == TokenType::DotDotEqual;
+    expr->start = std::move(start);
+    expr->end = bitOr();
+    return expr;
 }
 
 // Bitwise operators bind tighter than comparisons (unlike C), so
@@ -1303,6 +1465,14 @@ ExprPtr Parser::postfix() {
             member->object = std::move(expr);
             member->name = name.lexeme;
             expr = std::move(member);
+        } else if (check(TokenType::QuestionDot)) {
+            advance();
+            const Token& name = consume(TokenType::Identifier, "a field or method name after '?.'");
+            auto member = nodeAt<MemberExpr>(name);
+            member->object = std::move(expr);
+            member->name = name.lexeme;
+            member->optional = true;
+            expr = std::move(member);
         } else if ((check(TokenType::PlusPlus) || check(TokenType::MinusMinus)) && isAssignable(*expr)) {
             const Token& op = advance();
             auto incdec = std::make_unique<IncDecExpr>(expr->line, expr->column);
@@ -1315,15 +1485,73 @@ ExprPtr Parser::postfix() {
     }
 }
 
+// Arguments: positional ones, then named ones (`size: 10`); `...items`
+// spreads a list into positional arguments.
 ExprPtr Parser::finishCall(ExprPtr callee) {
     auto call = std::make_unique<CallExpr>(callee->line, callee->column);
     call->callee = std::move(callee);
+    FlagGuard lambdas(noLambda_, false);
     while (!check(TokenType::RightParen)) {
-        call->args.push_back(expression());
+        if (check(TokenType::Identifier) && peek(1).type == TokenType::Colon) {
+            const Token& name = advance();
+            advance();
+            if (std::find(call->argNames.begin(), call->argNames.end(), name.lexeme) != call->argNames.end()) {
+                error(name, "the argument '" + name.lexeme + "' is given twice");
+            }
+            call->hasNamedArgs = true;
+            call->argNames.push_back(name.lexeme);
+            call->args.push_back(expression());
+        } else {
+            if (call->hasNamedArgs) error(peek(), "positional arguments must come before named ones");
+            call->argNames.emplace_back();
+            call->args.push_back(spreadOrExpression());
+        }
         if (!match(TokenType::Comma)) break;
     }
     consume(TokenType::RightParen, "')' after the arguments");
     return call;
+}
+
+ExprPtr Parser::spreadOrExpression() {
+    if (!check(TokenType::Ellipsis)) return expression();
+    const Token& dots = advance();
+    auto spread = nodeAt<SpreadExpr>(dots);
+    spread->value = expression();
+    return spread;
+}
+
+// The rest of [value for x in items if test] or {key: value for ...}.
+ExprPtr Parser::comprehension(const Token& open, ExprPtr key, ExprPtr value, TokenType closing) {
+    auto expr = nodeAt<ComprehensionExpr>(open);
+    expr->isMap = key != nullptr;
+    expr->key = std::move(key);
+    expr->value = std::move(value);
+    while (true) {
+        skipNewlines();
+        if (match(TokenType::For)) {
+            ComprehensionClause clause;
+            clause.first = consume(TokenType::Identifier, "a loop variable name after 'for'").lexeme;
+            if (match(TokenType::Comma)) {
+                clause.second = consume(TokenType::Identifier, "a second loop variable name after ','").lexeme;
+            }
+            if (!match(TokenType::In) && !match(TokenType::Colon)) {
+                error(peek(), "expected 'in' after the loop variable, found " + describeToken(peek()));
+            }
+            clause.expr = expression();
+            expr->clauses.push_back(std::move(clause));
+        } else if (match(TokenType::If)) {
+            ComprehensionClause clause;
+            clause.isFor = false;
+            clause.expr = expression();
+            expr->clauses.push_back(std::move(clause));
+        } else {
+            break;
+        }
+    }
+    skipNewlines();
+    consume(closing, closing == TokenType::RightBracket ? "']' to close the list comprehension"
+                                                         : "'}' to close the map comprehension");
+    return expr;
 }
 
 ExprPtr Parser::finishIndex(ExprPtr object, const Token& bracket) {
@@ -1381,12 +1609,19 @@ ExprPtr Parser::primary() {
             return nodeAt<LiteralExpr>(token);
         }
         case TokenType::Identifier: {
+            if (!noLambda_ && peek(1).type == TokenType::FatArrow) return lambda(token, false);
             advance();
             auto variable = nodeAt<VariableExpr>(token);
             variable->name = token.lexeme;
             return variable;
         }
         case TokenType::LeftParen: {
+            if (!noLambda_) {
+                size_t close = matchingParen(current_);
+                if (close != std::string::npos && tokens_[close + 1].type == TokenType::FatArrow) {
+                    return lambda(token, true);
+                }
+            }
             advance();
             ExprPtr inner = expression();
             consume(TokenType::RightParen, "')' to close the '(' on line " + std::to_string(token.line));
@@ -1412,8 +1647,13 @@ ExprPtr Parser::primary() {
 
 ExprPtr Parser::listLiteral(const Token& bracket) {
     auto list = nodeAt<ListExpr>(bracket);
+    FlagGuard lambdas(noLambda_, false);
     while (!check(TokenType::RightBracket)) {
-        list->elements.push_back(expression());
+        ExprPtr element = spreadOrExpression();
+        if (list->elements.empty() && check(TokenType::For) && element->kind != ExprKind::Spread) {
+            return comprehension(bracket, nullptr, std::move(element), TokenType::RightBracket);
+        }
+        list->elements.push_back(std::move(element));
         if (!match(TokenType::Comma)) break;
     }
     consume(TokenType::RightBracket, "']' to close the list that starts on line " + std::to_string(bracket.line));
@@ -1426,9 +1666,18 @@ ExprPtr Parser::mapLiteral(const Token& brace) {
     auto map = nodeAt<MapExpr>(brace);
     skipNewlines();
     while (!check(TokenType::RightBrace)) {
+        if (check(TokenType::Ellipsis)) {  // {...defaults, size: 2}
+            map->entries.emplace_back(spreadOrExpression(), nullptr);
+            skipNewlines();
+            if (!match(TokenType::Comma)) break;
+            skipNewlines();
+            continue;
+        }
         ExprPtr key;
+        const Token* bareName = nullptr;
         if (check(TokenType::Identifier) && peek(1).type == TokenType::Colon) {
             const Token& name = advance();
+            bareName = &name;
             auto literal = nodeAt<LiteralExpr>(name);
             literal->value = Value::fromString(name.lexeme);
             key = std::move(literal);
@@ -1439,6 +1688,15 @@ ExprPtr Parser::mapLiteral(const Token& brace) {
         consume(TokenType::Colon, "':' after the map key");
         skipNewlines();
         ExprPtr value = expression();
+        if (map->entries.empty() && peekPastNewlines().type == TokenType::For) {
+            // In {k: v for k, v in pairs}, a bare name is the loop variable, not a string key.
+            if (bareName != nullptr) {
+                auto variable = nodeAt<VariableExpr>(*bareName);
+                variable->name = bareName->lexeme;
+                key = std::move(variable);
+            }
+            return comprehension(brace, std::move(key), std::move(value), TokenType::RightBrace);
+        }
         map->entries.emplace_back(std::move(key), std::move(value));
         skipNewlines();
         if (!match(TokenType::Comma)) break;

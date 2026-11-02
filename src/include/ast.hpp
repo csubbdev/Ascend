@@ -22,7 +22,8 @@ using StmtPtr = std::unique_ptr<Stmt>;
 
 enum class ExprKind {
     Literal, Variable, Unary, Binary, Logical, Ternary,
-    Call, Index, Slice, Member, List, Map, Function, FString, IncDec
+    Call, Index, Slice, Member, List, Map, Function, FString, IncDec,
+    Comprehension, Range, Spread
 };
 
 struct Expr {
@@ -60,7 +61,7 @@ struct BinaryExpr final : Expr {
     ExprPtr right;
 };
 
-// `and` / `or`, which only evaluate their right side when needed.
+// `and` / `or` / `??`, which only evaluate their right side when needed.
 struct LogicalExpr final : Expr {
     LogicalExpr(int line, int column) : Expr(ExprKind::Logical, line, column) {}
     TokenType op = TokenType::And;
@@ -75,10 +76,13 @@ struct TernaryExpr final : Expr {
     ExprPtr elseExpr;
 };
 
+// f(a, b, name: c, ...rest)
 struct CallExpr final : Expr {
     CallExpr(int line, int column) : Expr(ExprKind::Call, line, column) {}
     ExprPtr callee;
     std::vector<ExprPtr> args;
+    std::vector<std::string> argNames;  // one per argument: "" for positional ones
+    bool hasNamedArgs = false;
 };
 
 struct IndexExpr final : Expr {
@@ -95,11 +99,12 @@ struct SliceExpr final : Expr {
     ExprPtr end;
 };
 
-// object.name
+// object.name, or object?.name (null when the object is null)
 struct MemberExpr final : Expr {
     MemberExpr(int line, int column) : Expr(ExprKind::Member, line, column) {}
     ExprPtr object;
     std::string name;
+    bool optional = false;
 };
 
 struct ListExpr final : Expr {
@@ -120,6 +125,36 @@ struct IncDecExpr final : Expr {
     bool prefix = false;  // ++x gives the new value, x++ the old one
 };
 
+// [x * 2 for x in items if x > 0]   {k: v for k, v in pairs}
+struct ComprehensionClause {
+    bool isFor = true;       // `for a, b in iterable`, or `if condition`
+    std::string first;
+    std::string second;      // may be empty
+    ExprPtr expr;            // the iterable or the condition
+};
+
+struct ComprehensionExpr final : Expr {
+    ComprehensionExpr(int line, int column) : Expr(ExprKind::Comprehension, line, column) {}
+    bool isMap = false;
+    ExprPtr key;             // maps only
+    ExprPtr value;           // the list element, or the map value
+    std::vector<ComprehensionClause> clauses;
+};
+
+// start..end (end not included) and start..=end (included)
+struct RangeExpr final : Expr {
+    RangeExpr(int line, int column) : Expr(ExprKind::Range, line, column) {}
+    ExprPtr start;
+    ExprPtr end;
+    bool inclusive = false;
+};
+
+// ...items: spreads a list into a call's arguments or a list, or a map into a map
+struct SpreadExpr final : Expr {
+    SpreadExpr(int line, int column) : Expr(ExprKind::Spread, line, column) {}
+    ExprPtr value;
+};
+
 // f"text {expression:spec} more text"
 struct FStringPart {
     std::string text;   // literal text (when expr is null)
@@ -138,7 +173,7 @@ struct FStringExpr final : Expr {
 enum class StmtKind {
     Expression, Declare, Assign, Block, If, While, For, CFor,
     Break, Continue, Return, Function, Try, Throw, Match,
-    Switch, Import, Struct, Enum, Group
+    Switch, Import, Struct, Enum, Group, MultiAssign
 };
 
 struct Stmt {
@@ -171,6 +206,7 @@ struct FunctionExpr final : Expr {
     std::string name;  // empty for anonymous functions
     std::vector<Param> params;
     size_t requiredParams = 0;  // parameters without a default value
+    bool variadic = false;      // the last parameter (...rest) collects the remaining arguments in a list
     TypeSpec returnType;        // `any` when the function has no return type
     Block body;
 };
@@ -266,8 +302,19 @@ struct FunctionStmt final : Stmt {
 struct TryStmt final : Stmt {
     TryStmt(int line, int column) : Stmt(StmtKind::Try, line, column) {}
     Block body;
+    bool hasCatch = false;
     std::string errorName;  // may be empty: `catch { ... }`
     Block handler;
+    bool hasFinally = false;
+    Block finallyBody;      // runs however the try block ends
+};
+
+// a, b := pair      a, b = b, a      x, y = point_list
+struct MultiAssignStmt final : Stmt {
+    MultiAssignStmt(int line, int column) : Stmt(StmtKind::MultiAssign, line, column) {}
+    std::vector<ExprPtr> targets;  // VariableExpr (for :=), or anything assignable
+    bool declare = false;
+    std::vector<ExprPtr> values;   // one list to unpack, or one value per target
 };
 
 struct ThrowStmt final : Stmt {
@@ -341,6 +388,9 @@ struct StructStmt final : Stmt {
     StructStmt(int line, int column) : Stmt(StmtKind::Struct, line, column) {}
     std::string name;
     std::vector<StructField> fields;
+    // name -> method. Methods get the value they're called on as their first
+    // parameter, `this`.
+    std::vector<std::pair<std::string, std::unique_ptr<FunctionExpr>>> methods;
 };
 
 // enum Color { Red, Green = 5, Blue }  makes the constant map Color.

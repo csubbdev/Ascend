@@ -15,6 +15,7 @@ enum class TokenType {
     // Punctuation
     LeftParen, RightParen, LeftBracket, RightBracket, LeftBrace, RightBrace,
     Comma, Dot, Colon, Semicolon, Question, Arrow /* -> */, FatArrow /* => */,
+    QuestionQuestion /* ?? */, QuestionDot /* ?. */, DotDot /* .. */, DotDotEqual /* ..= */, Ellipsis /* ... */,
 
     // Operators
     Plus, Minus, Star, StarStar, Slash, Percent, PlusPlus, MinusMinus,
@@ -86,6 +87,8 @@ private:
     void identifier();
     void number(char first);
     void string(char quote);
+    void longString(bool raw);
+    void rawString();
     void character();
     void fString();
     bool escape(char32_t& out);

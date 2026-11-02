@@ -19,6 +19,7 @@ class Environment;
 class Interpreter;
 struct FunctionExpr;
 struct StructStmt;
+struct StructType;
 struct ListObj;
 struct MapObj;
 struct Callable;
@@ -91,6 +92,7 @@ public:
     Callable& asFunction() const { return *std::get<8>(data_); }
     const std::shared_ptr<ListObj>& listPtr() const { return std::get<6>(data_); }
     const std::shared_ptr<MapObj>& mapPtr() const { return std::get<7>(data_); }
+    const std::shared_ptr<Callable>& functionPtr() const { return std::get<8>(data_); }
 
     bool truthy() const;
     const char* typeName() const;  // "int", "u8", "f32", "char", "string", ...
@@ -134,8 +136,10 @@ struct StructInfo {
 // fields, and the interpreter checks the type of each value stored in them.
 struct MapObj final : GcObject {
     std::vector<std::pair<Value, Value>> entries;
-    std::shared_ptr<const StructInfo> structInfo;  // null for ordinary maps
+    std::shared_ptr<StructType> structType;  // the struct it's a value of; null for ordinary maps
     std::string frozenAs;  // set for enums, whose members can't change: "enum Color"
+
+    const StructInfo* structInfo() const;  // the struct's fields, or nullptr
 
     const Value* find(const Value& key) const;  // nullptr if missing (or unhashable)
     Value* find(const Value& key);
@@ -207,13 +211,27 @@ struct StructType final : Callable, GcObject {
 
     GcObject* gcObject() override { return this; }
     void forEachChild(const std::function<void(GcObject*)>& visit) const override;
-    void clearReferences() override { closure.reset(); }
+    void clearReferences() override {
+        closure.reset();
+        methods.clear();
+    }
+
+    // A method by name, or nullptr.
+    const Value* method(const std::string& name) const {
+        for (const auto& entry : methods) {
+            if (entry.first == name) return &entry.second;
+        }
+        return nullptr;
+    }
 
     std::shared_ptr<const StructInfo> info;
     const StructStmt* declaration;  // owned by the interpreter's list of programs
     std::shared_ptr<Environment> closure;
     const SourceFile* source;
+    std::vector<std::pair<std::string, Value>> methods;  // functions taking `this` first
 };
+
+inline const StructInfo* MapObj::structInfo() const { return structType ? structType->info.get() : nullptr; }
 
 // The type name type() reports: "int", "string", ... or a struct's name.
 std::string typeNameOf(const Value& value);

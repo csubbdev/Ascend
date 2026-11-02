@@ -36,7 +36,7 @@ private:
 
     // Statements
     StmtPtr statement();
-    StmtPtr simpleStatement(bool requireEnd = true);
+    StmtPtr simpleStatement(bool requireEnd = true, bool allowMulti = true);
     StmtPtr ifStatement(const Token& keyword);
     StmtPtr whileStatement(const Token& keyword);
     StmtPtr doStatement(const Token& keyword);
@@ -60,6 +60,10 @@ private:
     StmtPtr matchStatement(const Token& keyword);
     std::unique_ptr<FunctionExpr> functionRest(const Token& keyword, const std::string& name,
                                                const TypeSpec* returnType = nullptr);
+    void parameters(FunctionExpr& function);
+    ExprPtr lambda(const Token& start, bool parenthesized);
+    ExprPtr spreadOrExpression();
+    ExprPtr comprehension(const Token& open, ExprPtr key, ExprPtr value, TokenType closing);
     TypeSpec parseType(bool allowVoid, bool allowStruct = true);
     size_t typeLength(size_t offset, bool allowStruct = false) const;
     bool isDeclaration(size_t typeTokens) const;
@@ -80,11 +84,13 @@ private:
     // Expressions, from lowest to highest precedence
     ExprPtr expression();
     ExprPtr ternary();
+    ExprPtr nullish();
     ExprPtr logicOr();
     ExprPtr logicAnd();
     ExprPtr logicNot();
     ExprPtr equality();
     ExprPtr comparison();
+    ExprPtr range();
     ExprPtr bitOr();
     ExprPtr bitXor();
     ExprPtr bitAnd();
@@ -123,6 +129,7 @@ private:
     bool incomplete_ = false;
     int depth_ = 0;
     int functionCount_ = 0;  // functions parsed so far (to spot loop bodies that create closures)
+    bool noLambda_ = false;  // in match patterns, `x => ...` is a pattern and its arm
     StackLimit stack_;
 };
 

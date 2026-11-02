@@ -47,6 +47,22 @@
           ]
         },
         {
+          "name": "string.quoted.triple.raw.ascend",
+          "begin": "\\br\"\"\"",
+          "end": "\"\"\""
+        },
+        {
+          "name": "string.quoted.triple.ascend",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [{ "include": "#escapes" }]
+        },
+        {
+          "name": "string.quoted.double.raw.ascend",
+          "begin": "\\br\"",
+          "end": "\""
+        },
+        {
           "name": "string.quoted.double.ascend",
           "begin": "\"",
           "end": "\"",
@@ -89,7 +105,7 @@
       "patterns": [
         {
           "name": "keyword.control.ascend",
-          "match": "\\b(if|else|while|for|in|break|continue|return|match|try|catch|throw|switch|case|default|do)\\b"
+          "match": "\\b(if|else|while|for|in|break|continue|return|match|try|catch|finally|throw|switch|case|default|do)\\b"
         },
         { "name": "keyword.control.import.ascend", "match": "^\\s*(import|from)\\b(?!\\s*[(:=])" },
         { "name": "keyword.control.import.ascend", "match": "\\b(as)\\b(?=\\s+[A-Za-z_])" },
@@ -112,7 +128,8 @@
     "constants": {
       "patterns": [
         { "name": "constant.language.ascend", "match": "\\b(true|false|null)\\b" },
-        { "name": "support.constant.ascend", "match": "\\b(PI|E|INF|NAN|args)\\b" }
+        { "name": "support.constant.ascend", "match": "\\b(PI|E|INF|NAN|args)\\b" },
+        { "name": "variable.language.this.ascend", "match": "\\bthis\\b" }
       ]
     },
     "function-call": {
@@ -124,6 +141,8 @@
         { "name": "keyword.operator.assignment.ascend", "match": ":=|<<=|>>=|[-+*/%&|^]=" },
         { "name": "keyword.operator.increment.ascend", "match": "\\+\\+|--" },
         { "name": "keyword.operator.arrow.ascend", "match": "->|=>" },
+        { "name": "keyword.operator.null.ascend", "match": "\\?\\?|\\?\\." },
+        { "name": "keyword.operator.range.ascend", "match": "\\.\\.\\.|\\.\\.=?" },
         { "name": "keyword.operator.bitwise.ascend", "match": "<<|>>" },
         { "name": "keyword.operator.comparison.ascend", "match": "==|!=|<=|>=|<|>" },
         { "name": "keyword.operator.logical.ascend", "match": "&&|\\|\\||!" },

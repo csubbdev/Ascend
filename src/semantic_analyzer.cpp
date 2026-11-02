@@ -188,6 +188,19 @@ void SemanticAnalyzer::visitStmt(const Stmt& stmt) {
                                     failure);
                 });
             }
+            for (const auto& method : declaration.methods) {
+                const FunctionExpr& function = *method.second;
+                if (!seen.insert(method.first).second) {
+                    report(function.line, function.column,
+                           "struct " + declaration.name + " already has a field or method named '" + method.first + "'");
+                }
+                if (method.first == "init" && function.params.size() > 1) {
+                    report(function.line, function.column,
+                           "init() is called with no arguments when a " + declaration.name +
+                               " is made, so it can't have parameters");
+                }
+                visitFunction(function);
+            }
             break;
         }
         case StmtKind::Enum: {
@@ -206,6 +219,22 @@ void SemanticAnalyzer::visitStmt(const Stmt& stmt) {
         case StmtKind::Group:
             for (const auto& inner : stmt.as<GroupStmt>().statements) visitStmt(*inner);
             break;
+        case StmtKind::MultiAssign: {
+            const auto& assign = stmt.as<MultiAssignStmt>();
+            std::set<std::string> seen;
+            for (const auto& target : assign.targets) {
+                visitExpr(target.get());
+                if (target->kind == ExprKind::Variable) {
+                    const std::string& name = target->as<VariableExpr>().name;
+                    if (assign.declare) declared_.insert(name);
+                    if (!seen.insert(name).second) {
+                        report(target->line, target->column, "'" + name + "' is listed twice");
+                    }
+                }
+            }
+            for (const auto& value : assign.values) visitExpr(value.get());
+            break;
+        }
         case StmtKind::Break:
             if (loopDepth_ == 0 && switchDepth_ == 0) {
                 report(stmt.line, stmt.column, "'break' can only be used inside a loop or switch");
@@ -243,6 +272,7 @@ void SemanticAnalyzer::visitStmt(const Stmt& stmt) {
             const auto& tryStmt = stmt.as<TryStmt>();
             visitBlock(tryStmt.body);
             visitBlock(tryStmt.handler);
+            visitBlock(tryStmt.finallyBody);
             break;
         }
         case StmtKind::Throw:
@@ -270,6 +300,20 @@ void SemanticAnalyzer::visitExpr(const Expr* expr) {
             break;
         case ExprKind::IncDec:
             visitExpr(expr->as<IncDecExpr>().target.get());
+            break;
+        case ExprKind::Comprehension: {
+            const auto& comprehension = expr->as<ComprehensionExpr>();
+            for (const auto& clause : comprehension.clauses) visitExpr(clause.expr.get());
+            visitExpr(comprehension.key.get());
+            visitExpr(comprehension.value.get());
+            break;
+        }
+        case ExprKind::Range:
+            visitExpr(expr->as<RangeExpr>().start.get());
+            visitExpr(expr->as<RangeExpr>().end.get());
+            break;
+        case ExprKind::Spread:
+            visitExpr(expr->as<SpreadExpr>().value.get());
             break;
         case ExprKind::Unary:
             visitExpr(expr->as<UnaryExpr>().operand.get());

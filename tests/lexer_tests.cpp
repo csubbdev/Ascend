@@ -179,3 +179,34 @@ TEST(lexer_f_strings) {
     CHECK_EQ(firstError("f\"{x\""), std::string("unterminated string (missing closing \")"));
     CHECK_EQ(firstError("f\"oops }\""), std::string("single '}' in f-string (write '}}' for a literal brace)"));
 }
+
+TEST(lexer_raw_and_long_strings) {
+    std::vector<Token> raw = Lexer("r\"C:\\new\\d+\"").tokenize();
+    CHECK(raw[0].type == TokenType::String);
+    CHECK_EQ(raw[0].text, "C:\\new\\d+");
+
+    std::vector<Token> longString = Lexer("x := \"\"\"\nfirst \"quoted\"\n  second\\t\"\"\"\ny").tokenize();
+    CHECK(longString[2].type == TokenType::String);
+    CHECK_EQ(longString[2].text, "first \"quoted\"\n  second\t");
+    CHECK_EQ(longString[4].lexeme, "y");
+    CHECK_EQ(longString[4].line, 4);
+
+    std::vector<Token> rawLong = Lexer("r\"\"\"a\\nb\"\"\"").tokenize();
+    CHECK_EQ(rawLong[0].text, "a\\nb");
+
+    Lexer unterminated("\"\"\"never closed");
+    unterminated.tokenize();
+    CHECK_EQ(unterminated.errors().size(), size_t(1));
+}
+
+TEST(lexer_new_operators) {
+    std::vector<Token> tokens = Lexer("a ?? b?.c 0..5 1..=2 ...xs x ? .5 : y").tokenize();
+    std::vector<TokenType> expected = {TokenType::Identifier, TokenType::QuestionQuestion, TokenType::Identifier,
+                                       TokenType::QuestionDot, TokenType::Identifier, TokenType::Int,
+                                       TokenType::DotDot, TokenType::Int, TokenType::Int, TokenType::DotDotEqual,
+                                       TokenType::Int, TokenType::Ellipsis, TokenType::Identifier,
+                                       TokenType::Identifier, TokenType::Question, TokenType::Dot};
+    for (size_t i = 0; i < expected.size(); ++i) CHECK(tokens[i].type == expected[i]);
+    CHECK(Lexer("1.5").tokenize()[0].type == TokenType::Float);
+    CHECK(Lexer("x++ --y").tokenize()[1].type == TokenType::PlusPlus);
+}

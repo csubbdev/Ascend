@@ -70,6 +70,11 @@ Each type name converts a value to that type, and fails if it doesn't fit.
 | `reduce(list, f, initial?)` | Combines the elements: `reduce([1, 2, 3], func(a, b) { return a + b })` is `6`. |
 | `find(list, f)` | The first element for which `f(element)` is truthy, or `null`. |
 | `any(list, f?)`, `all(list, f?)` | Whether any / all elements (or `f(element)`) are truthy. |
+| `flat_map(list, f)` | Calls `f` on each element and joins the lists it returns: `flat_map([1, 2], x => [x, x])` is `[1, 1, 2, 2]`. |
+| `group_by(list, f)` | A map from each `f(element)` to the list of elements that gave it: `group_by(words, w => len(w))`. |
+| `count_by(list, f)` | A map from each `f(element)` to how many elements gave it. |
+| `chunk(list, size)` | The list cut into lists of `size` elements (the last may be shorter). |
+| `min_by(list, f)`, `max_by(list, f)` | The element with the smallest / largest `f(element)`: `max_by(people, p => p.age)`. |
 | `copy(x)` | A shallow copy of a list, map or struct. |
 
 ## Maps
@@ -122,6 +127,7 @@ Lengths and positions count characters, not bytes.
 | `max(a, b, ...)`, `max(list)` | Largest value. |
 | `clamp(x, low, high)` | `x` limited to the range `low`..`high`. |
 | `sum(list)` | Sum of a list of numbers. Small integer types are widened, so the sum of `u8` values is an `int`. |
+| `mean(list)`, `median(list)` | The average / middle value of a list of numbers, as a float. |
 | `sign(x)` | `-1`, `0` or `1`. |
 | `gcd(a, b)` | Greatest common divisor. |
 | `sqrt(x)`, `cbrt(x)` | Square and cube root. |
@@ -157,8 +163,9 @@ Lengths and positions count characters, not bytes.
 
 ## Regular expressions
 
-Patterns use JavaScript (ECMAScript) syntax. Remember to double backslashes in
-strings: `"\\d+"` is the pattern `\d+`.
+Patterns use JavaScript (ECMAScript) syntax. Raw strings keep backslashes as
+written, so they're the easiest way to write patterns: `r"\d+"` (the same as
+`"\\d+"`).
 
 | Function | Description |
 |----------|-------------|

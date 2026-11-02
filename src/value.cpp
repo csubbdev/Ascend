@@ -71,13 +71,13 @@ void write(std::string& out, const Value& value, bool repr, std::vector<const vo
             }
             checkNesting(static_cast<int>(active.size()));
             active.push_back(map);
-            if (map->structInfo) out += map->structInfo->name;  // Point{x: 1, y: 2}
+            if (map->structInfo()) out += map->structInfo()->name;  // Point{x: 1, y: 2}
             out += '{';
             bool first = true;
             for (const auto& entry : map->entries) {
                 if (!first) out += ", ";
                 first = false;
-                if (map->structInfo && entry.first.isString()) {
+                if (map->structInfo() && entry.first.isString()) {
                     out += entry.first.asString();
                 } else {
                     write(out, entry.first, true, active);
@@ -137,7 +137,7 @@ bool equalAt(const Value& a, const Value& b, int depth) {
             const MapObj& x = a.asMap();
             const MapObj& y = b.asMap();
             if (x.size() != y.size()) return false;
-            if ((x.structInfo ? x.structInfo->name : "") != (y.structInfo ? y.structInfo->name : "")) return false;
+            if ((x.structInfo() ? x.structInfo()->name : "") != (y.structInfo() ? y.structInfo()->name : "")) return false;
             for (const auto& entry : x.entries) {
                 const Value* other = y.find(entry.first);
                 if (other == nullptr || !equalAt(entry.second, *other, depth + 1)) return false;
@@ -382,6 +382,7 @@ bool MapObj::remove(const Value& key, Value* removed) {
 }
 
 void MapObj::forEachChild(const std::function<void(GcObject*)>& visit) const {
+    if (structType) visit(structType.get());
     for (const auto& entry : entries) {
         if (GcObject* child = entry.first.gcObject()) visit(child);
         if (GcObject* child = entry.second.gcObject()) visit(child);
@@ -391,6 +392,7 @@ void MapObj::forEachChild(const std::function<void(GcObject*)>& visit) const {
 void MapObj::clearReferences() {
     entries.clear();
     index_.clear();
+    structType.reset();
 }
 
 void FunctionObj::forEachChild(const std::function<void(GcObject*)>& visit) const {
@@ -399,6 +401,9 @@ void FunctionObj::forEachChild(const std::function<void(GcObject*)>& visit) cons
 
 void StructType::forEachChild(const std::function<void(GcObject*)>& visit) const {
     if (closure) visit(closure.get());
+    for (const auto& entry : methods) {
+        if (GcObject* child = entry.second.gcObject()) visit(child);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -452,14 +457,14 @@ std::string quoteChar(char32_t c) {
 }
 
 std::string typeNameOf(const Value& value) {
-    if (value.isMap() && value.asMap().structInfo) return value.asMap().structInfo->name;
+    if (value.isMap() && value.asMap().structInfo()) return value.asMap().structInfo()->name;
     return value.typeName();
 }
 
 std::string aTypeName(const Value& value) {
     std::string name = typeNameOf(value);
     if (value.isNull()) return "null";
-    if (value.isMap() && value.asMap().structInfo) {
+    if (value.isMap() && value.asMap().structInfo()) {
         char first = static_cast<char>(std::tolower(static_cast<unsigned char>(name[0])));
         bool vowel = first == 'a' || first == 'e' || first == 'i' || first == 'o' || first == 'u';
         return (vowel ? "an " : "a ") + name;

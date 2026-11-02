@@ -42,8 +42,11 @@ for name, score in scores {
   bodies without braces (`if (x < 0) x = -x`), casts like `(f64) total / n`,
   `printf("%-8s %5.2f\n", name, price)` and a `main()` function that runs
   automatically
-- **Structs** with typed fields (`struct Point { f64 x; f64 y = 0 }`) and
-  **enums** (`enum Color { Red, Green, Blue }`)
+- **Structs** with typed fields and methods (`struct Point { f64 x; f64 y = 0;
+  f64 length() { ... } }`) and **enums** (`enum Color { Red, Green, Blue }`)
+- **Lambdas** (`x => x * 2`), **comprehensions** (`[x * x for x in 1..=10 if
+  x % 2 == 0]`), **ranges** (`0..n`), destructuring (`a, b = b, a`), `??` and
+  `?.`, named arguments, `...rest` parameters and spreading, and `finally`
 - Constants, `match`, `if` / `else if`, `while`, `for ... in` over ranges,
   lists, strings and maps, `break` / `continue`, `auto` type inference
 - Functions with default parameters, recursion, closures and anonymous functions

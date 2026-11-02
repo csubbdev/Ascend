@@ -325,3 +325,157 @@ TEST(lang_float_printing) {
     CHECK_OUTPUT("print(20.0, 100.0, 1e15, 1e16, 0.0001, 0.00001, 123456.789, -20.0)",
                  "20.0 100.0 1000000000000000.0 1e+16 0.0001 1e-05 123456.789 -20.0\n");
 }
+
+// ---------------------------------------------------------------------------
+// Methods, lambdas, comprehensions and more
+
+TEST(lang_struct_methods) {
+    const char* vec =
+        "struct Vec {\n"
+        "    f64 x\n"
+        "    f64 y = 0\n"
+        "    f64 length() { return hypot(this.x, this.y) }\n"
+        "    void scale(f64 k) {\n"
+        "        this.x *= k\n"
+        "        this.y *= k\n"
+        "    }\n"
+        "    func plus(other) { return Vec(this.x + other.x, this.y + other.y) }\n"
+        "    label() { return f\"({this.x}, {this.y})\" }\n"
+        "}\n";
+    CHECK_OUTPUT(std::string(vec) + "v := Vec(3, 4)\nprint(v.length(), v.plus(Vec(1)).label())", "5.0 (4.0, 4.0)\n");
+    CHECK_OUTPUT(std::string(vec) + "v := Vec(1, 2)\nv.scale(3)\nprint(v)", "Vec{x: 3.0, y: 6.0}\n");
+    CHECK_ERROR(std::string(vec) + "print(Vec(1).length)", "'length' is a method of Vec; call it: .length()");
+    CHECK_ERROR(std::string(vec) + "Vec(1).size()", "Vec has no method or field 'size'");
+    CHECK_ERROR(std::string(vec) + "Vec(1).scale(\"big\")", "Vec.scale() expects 'k' to be f64, but got a string");
+    // Methods win over functions with the same name, and fields hold their own functions.
+    CHECK_OUTPUT("func size(x) { return \"global\" }\nstruct S { size() { return \"method\" } }\nprint(S().size())", "method\n");
+    // init() runs when a value is made.
+    const char* account =
+        "struct Account {\n"
+        "    string owner\n"
+        "    f64 balance = 0\n"
+        "    void init() {\n"
+        "        assert(this.balance >= 0, \"balance can't be negative\")\n"
+        "        this.owner = upper(this.owner)\n"
+        "    }\n"
+        "}\n";
+    CHECK_OUTPUT(std::string(account) + "print(Account(\"ada\", 5))", "Account{owner: \"ADA\", balance: 5.0}\n");
+    CHECK_ERROR(std::string(account) + "Account(\"bob\", -1)", "balance can't be negative");
+    CHECK_ERROR("struct P { i32 a; f64 a() { return 1 } }", "struct P already has a field or method named 'a'");
+    CHECK_ERROR("struct P { void init(i32 x) { } }", "init() is called with no arguments when a P is made");
+}
+
+TEST(lang_lambdas) {
+    CHECK_OUTPUT("double := x => x * 2\nadd := (a, b) => a + b\nprint(double(4), add(2, 3))", "8 5\n");
+    CHECK_OUTPUT("print(map([1, 2, 3], x => x * x), filter(range(10), n => n % 4 == 0))", "[1, 4, 9] [0, 4, 8]\n");
+    CHECK_OUTPUT("print(sort([\"ccc\", \"a\", \"bb\"], s => len(s)))", "[\"a\", \"bb\", \"ccc\"]\n");
+    CHECK_OUTPUT("square := (i32 n) => { return n * n }\nprint(square(7))", "49\n");
+    CHECK_ERROR("square := (i32 n) => n * n\nsquare(\"x\")", "expects 'n' to be i32");
+    CHECK_OUTPUT("make := n => () => n + 1\nprint(make(5)())", "6\n");
+    CHECK_OUTPUT("x := 3\nmatch x {\n    3 => print(\"three\")\n    else => print(\"other\")\n}", "three\n");
+}
+
+TEST(lang_comprehensions) {
+    CHECK_OUTPUT("print([x * x for x in 1..=5])", "[1, 4, 9, 16, 25]\n");
+    CHECK_OUTPUT("print([x for x in range(20) if x % 7 == 0])", "[0, 7, 14]\n");
+    CHECK_OUTPUT("print([[a, b] for a in 1..3 for b in \"xy\"])", "[[1, 'x'], [1, 'y'], [2, 'x'], [2, 'y']]\n");
+    CHECK_OUTPUT("print({k: v * 10 for k, v in {a: 1, b: 2}})", "{\"a\": 10, \"b\": 20}\n");
+    CHECK_OUTPUT("print({s: len(s) for s in [\"hi\", \"hey\"] if len(s) > 2})", "{\"hey\": 3}\n");
+    CHECK_OUTPUT("print([i for i, c in \"abc\" if c != 'b'], [k for k in {x: 1, y: 2}])", "[0, 2] [\"x\", \"y\"]\n");
+    // The loop variables don't leak out.
+    CHECK_ERROR("[x for x in [1]]\nprint(x)", "undefined variable 'x'");
+    CHECK_OUTPUT("fns := [() => i for i in 0..3]\nprint([f() for f in fns])", "[0, 1, 2]\n");
+}
+
+TEST(lang_destructuring) {
+    CHECK_OUTPUT("a, b := 1, 2\na, b = b, a\nprint(a, b)", "2 1\n");
+    CHECK_OUTPUT("func minmax(list xs) { return min(xs), max(xs) }\nlo, hi := minmax([5, 3, 9])\nprint(lo, hi)", "3 9\n");
+    CHECK_OUTPUT("struct P { i32 x; i32 y }\nx, y := P(7, 8)\nprint(x, y)", "7 8\n");
+    CHECK_OUTPUT("items := [0, 0]\nm := {}\nitems[0], m.key = \"a\", \"b\"\nprint(items, m)", "[\"a\", 0] {\"key\": \"b\"}\n");
+    CHECK_ERROR("a, b := [1]", "can't unpack 1 value into 2 variables");
+    CHECK_ERROR("a, b := 5", "can't unpack an int value into 2 variables (it needs a list or a struct)");
+    CHECK_ERROR("i32 a = 0\nb := 0\na, b = \"x\", 1", "'a' is declared as i32, so it can't hold a string");
+}
+
+TEST(lang_null_operators) {
+    CHECK_OUTPUT("string? name = null\nprint(name ?? \"anonymous\", \"set\" ?? \"other\", 0 ?? 5, false ?? true)",
+                 "anonymous set 0 false\n");
+    CHECK_OUTPUT("user := {address: null}\nprint(user.address?.city, user?.address, null?.length())", "null null null\n");
+    CHECK_OUTPUT("user := {address: {city: \"Oslo\"}}\nprint(user.address?.city ?? \"?\")", "Oslo\n");
+    CHECK_OUTPUT("calls := 0\nfunc f() { calls++\n return 1 }\nx := 5 ?? f()\nprint(x, calls)", "5 0\n");
+}
+
+TEST(lang_ranges) {
+    CHECK_OUTPUT("print(0..4, 1..=3, 'a'..='d', 5..2)", "[0, 1, 2, 3] [1, 2, 3] ['a', 'b', 'c', 'd'] []\n");
+    CHECK_OUTPUT("total := 0\nfor i in 1..=100 { total += i }\nprint(total)", "5050\n");
+    CHECK_OUTPUT("for i in 0..1000000000 { if (i == 3) break }\nprint(\"no list was built\")", "no list was built\n");
+    CHECK_OUTPUT("print(5 in 1..10, 10 in 1..10, 10 in 1..=10, 'q' in 'a'..='z', 2.5 in 0..3, \"x\" in 0..3)",
+                 "true false true true true false\n");
+    CHECK_OUTPUT("func grade(i32 score) {\n    switch (score) {\n    case 90..=100: return \"A\"\n    case 80..90: return \"B\"\n"
+                 "    default: return \"C\"\n    }\n}\nprint(grade(95), grade(85), grade(10))",
+                 "A B C\n");
+    CHECK_OUTPUT("match 15 {\n    0..10 => print(\"small\")\n    10..100 => print(\"medium\")\n}", "medium\n");
+    CHECK_ERROR("print(\"a\"..\"b\")", "a range needs two integers or two chars, not a string and a string");
+    CHECK_ERROR("x := 1..=100000000", "the range is too large to make a list from");
+}
+
+TEST(lang_variadic_and_spread) {
+    const char* sum = "i32 sum(i32 ...nums) {\n    i32 total = 0\n    for (n in nums) total += n\n    return total\n}\n";
+    CHECK_OUTPUT(std::string(sum) + "print(sum(), sum(1, 2, 3), sum(...[4, 5], 6))", "0 6 15\n");
+    CHECK_ERROR(std::string(sum) + "sum(1, \"x\")", "sum() expects each of 'nums' to be i32, but got a string");
+    CHECK_OUTPUT("func log(string level, ...parts) { print(level + \":\", join(parts, \" \")) }\nlog(\"info\", \"a\", 1, true)\nlog(\"x\")",
+                 "info: a 1 true\nx: \n");
+    CHECK_ERROR("func f(a, ...rest) { }\nf()", "f() expects at least 1 argument but got 0");
+    CHECK_OUTPUT("print([0, ...[1, 2], 3, ...(4..6)])", "[0, 1, 2, 3, 4, 5]\n");
+    CHECK_OUTPUT("defaults := {color: \"red\", size: 1}\nprint({...defaults, size: 2})", "{\"color\": \"red\", \"size\": 2}\n");
+    CHECK_OUTPUT("xs := [1, 2]\nprint([...xs, ...xs], max(...xs))", "[1, 2, 1, 2] 2\n");
+    CHECK_ERROR("print(...5)", "'...' needs a list to spread into the arguments, not an int");
+}
+
+TEST(lang_named_arguments) {
+    const char* greet = "func greet(string name, string greeting = \"Hello\", string mark = \"!\") {\n"
+                        "    return greeting + \", \" + name + mark\n}\n";
+    CHECK_OUTPUT(std::string(greet) + "print(greet(\"Ada\", mark: \"?\"), greet(greeting: \"Hi\", name: \"Bob\"))",
+                 "Hello, Ada? Hi, Bob!\n");
+    CHECK_ERROR(std::string(greet) + "greet(\"x\", nope: 1)",
+                "greet() has no parameter named 'nope' (its parameters are: name, greeting, mark)");
+    CHECK_ERROR(std::string(greet) + "greet(mark: \"!\")", "greet() needs a value for 'name'");
+    CHECK_ERROR(std::string(greet) + "greet(\"x\", name: \"y\")", "greet() got two values for 'name'");
+    CHECK_ERROR("print(1, sep: \"\")", "print() doesn't take arguments by name");
+    CHECK_OUTPUT("struct Box { f64 w = 1; f64 h = 1; string label = \"box\" }\nprint(Box(h: 3, label: \"tall\"))",
+                 "Box{w: 1.0, h: 3.0, label: \"tall\"}\n");
+    CHECK_ERROR("struct Box { f64 w }\nBox(depth: 2)", "Box() has no field named 'depth' (its fields are: w)");
+}
+
+TEST(lang_finally) {
+    const char* risky = "func risky(n) {\n    try {\n        if (n == 0) throw \"zero!\"\n        return \"ok \" + str(n)\n"
+                        "    } catch e {\n        return \"caught \" + e\n    } finally {\n        print(\"cleanup\", n)\n    }\n}\n";
+    CHECK_OUTPUT(std::string(risky) + "print(risky(1))\nprint(risky(0))", "cleanup 1\nok 1\ncleanup 0\ncaught zero!\n");
+    CHECK_OUTPUT("for i in range(3) {\n    try { if (i == 1) break } finally { print(\"finally\", i) }\n}", "finally 0\nfinally 1\n");
+    CHECK_OUTPUT("try {\n    try { x := 1 / 0 } finally { print(\"inner\") }\n} catch e { print(\"outer:\", e) }",
+                 "inner\nouter: division by zero\n");
+    // The function's result survives calls made in finally.
+    CHECK_OUTPUT("func helper() { return \"helper\" }\nfunc f() {\n    try { return \"result\" } finally { helper() }\n}\nprint(f())",
+                 "result\n");
+    CHECK_OUTPUT("func f() { try { throw \"x\" } finally { return \"replaced\" } }\nprint(f())", "replaced\n");
+    // An error that escapes still points at where it happened.
+    CHECK_ERROR("try {\n    x := 1 / 0\n} finally {\n    y := 2\n}", "test.asc:2:12: runtime error: division by zero");
+}
+
+TEST(lang_strings_raw_and_multiline) {
+    CHECK_OUTPUT("print(r\"C:\\new\\d+\")", "C:\\new\\d+\n");
+    CHECK_OUTPUT("print(regex_find_all(\"1-2 and 33-44\", r\"\\d+-\\d+\"))", "[\"1-2\", \"33-44\"]\n");
+    CHECK_OUTPUT("text := \"\"\"\nLine one\n  Line \"two\"\n\"\"\"\nprint(repr(text))", "\"Line one\\n  Line \\\"two\\\"\\n\"\n");
+}
+
+TEST(lang_list_helpers) {
+    CHECK_OUTPUT("print(group_by([\"apple\", \"bob\", \"avocado\"], w => str(w[0])))",
+                 "{\"a\": [\"apple\", \"avocado\"], \"b\": [\"bob\"]}\n");
+    CHECK_OUTPUT("print(count_by([1, 2, 3, 4, 5], n => n % 2 == 0))", "{false: 3, true: 2}\n");
+    CHECK_OUTPUT("print(chunk(1..=7, 3), flat_map([1, 2], x => [x, x * 10]))", "[[1, 2, 3], [4, 5, 6], [7]] [1, 10, 2, 20]\n");
+    CHECK_OUTPUT("print(mean([1, 2, 3, 4]), median([5, 1, 3]), median([4, 1, 3, 2]))", "2.5 3.0 2.5\n");
+    CHECK_OUTPUT("words := [\"bob\", \"avocado\", \"cat\"]\nprint(min_by(words, len), max_by(words, len))", "bob avocado\n");
+    CHECK_ERROR("mean([])", "mean() of an empty list");
+    CHECK_ERROR("median([1, \"x\"])", "median() needs a list of numbers, but it contains a string");
+    CHECK_ERROR("chunk([1], 0)", "chunk() size must be at least 1");
+}

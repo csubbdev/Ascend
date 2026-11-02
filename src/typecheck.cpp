@@ -99,11 +99,11 @@ bool coerceToType(const Value& value, const TypeSpec& type, Value& out, CoerceFa
             return true;
 
         case TypeKind::Struct:
-            if (value.isMap() && value.asMap().structInfo && value.asMap().structInfo->name == type.structName) {
+            if (value.isMap() && value.asMap().structInfo() && value.asMap().structInfo()->name == type.structName) {
                 out = value;
                 return true;
             }
-            if (value.isMap() && !value.asMap().structInfo) failure.hint = "use " + type.structName + "(...) to make one";
+            if (value.isMap() && !value.asMap().structInfo()) failure.hint = "use " + type.structName + "(...) to make one";
             break;
 
         default:
