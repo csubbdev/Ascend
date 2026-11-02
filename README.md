@@ -43,7 +43,8 @@ for name, score in scores {
 - f-strings with format specs: `f"{price:>8.2f}"`
 - Hex, binary and octal literals, type suffixes (`255u8`) and bitwise operators
 - Unicode strings and a `char` type
-- Modules with `import("file")`
+- Modules with `import("file")`, and **`apkg`, a package manager** like pip:
+  `apkg install colors`, then `import("colors")`
 - `try` / `catch` / `throw` error handling
 - 100+ builtins for strings, lists, maps, math, files, JSON and the system
 - Clear error messages that point at the problem, many caught before running:
@@ -65,10 +66,18 @@ cmake --build build
 ./build/ascend          # interactive REPL
 ```
 
+Install a package and use it:
+
+```sh
+./build/apkg install colors
+./build/ascend -e 'print(import("colors").green("Hello!"))'
+```
+
 ## Documentation
 
 - [Language guide](docs/syntax.md)
 - [Standard library](docs/standard_library.md)
+- [Packages and apkg](docs/packages.md)
 - [Building, installing, testing and editor support](docs/installation.md)
 - [Example programs](examples/)
 
@@ -83,6 +92,7 @@ cmake --build build
 | Values, numeric types and checked arithmetic | `src/value.cpp`, `src/numeric.cpp`, `src/types.cpp` |
 | Builtin functions, formatting and JSON | `src/stdlib.cpp`, `src/format.cpp`, `src/json.cpp` |
 | Command line and REPL | `src/main.cpp`, `src/repl.cpp`, `src/runner.cpp` |
+| Package manager (`apkg`) and finding packages for `import` | `src/apkg_main.cpp`, `src/package_manager.cpp`, `src/packages.cpp` |
 
 ## License
 

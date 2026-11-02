@@ -1,0 +1,16 @@
+{
+  "packages": {
+    "colors": {
+      "description": "Color and style text in the terminal",
+      "source": "registry:packages/colors"
+    },
+    "strings": {
+      "description": "Case conversion, word wrapping, padding, edit distance and other text tools",
+      "source": "registry:packages/strings"
+    },
+    "testing": {
+      "description": "Write and run unit tests for Ascend code",
+      "source": "registry:packages/testing"
+    }
+  }
+}

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0
+
+### New
+
+- **`apkg`, the Ascend package manager**, built and installed next to
+  `ascend`. `apkg install`, `uninstall`, `list`, `show`, `search` and `init`
+  work like pip and npm. Packages can come from the registry (`colors`,
+  `colors@1.0.0`), GitHub (`github:user/repo@v1.0`), any git repository
+  (`git+https://...`) or a folder (`./my-lib`), and their dependencies are
+  installed with them. See [docs/packages.md](docs/packages.md).
+- Projects: `apkg init` writes an `ascend.json`; inside a project packages go
+  into `ascend_packages/` and are recorded in `ascend.json`, and `apkg install`
+  with no names installs everything listed there.
+- `import("name")` finds installed packages when there's no `name.asc` next to
+  the importing file, and `import("name/file")` imports a file inside one.
+- A package registry (`registry/index.json`) with three official packages:
+  `colors` (terminal colors), `strings` (case conversion, word wrapping,
+  edit distance and more) and `testing` (unit tests).
+
+### Changed
+
+- Importing a file that doesn't exist suggests `apkg install` when the name
+  could be a package.
+
 ## 0.3.0
 
 ### New

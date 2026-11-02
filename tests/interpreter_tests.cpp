@@ -727,7 +727,9 @@ TEST(interp_imports) {
     // Errors inside a module point at the module's own file.
     CHECK_ERROR("m := import(\"ascend_test_module\")\nm.fail()", "ascend_test_module.asc:4:24: runtime error: division by zero");
     CHECK_ERROR("import(\"ascend_test_broken\")", "can't import \"ascend_test_broken\" because it has errors");
-    CHECK_ERROR("import(\"ascend_no_such_module\")", "file 'ascend_no_such_module.asc' not found");
+    CHECK_ERROR("import(\"ascend_no_such_module\")",
+                "no file 'ascend_no_such_module.asc' and no installed package named 'ascend_no_such_module'");
+    CHECK_ERROR("import(\"./ascend_no_such_module\")", "file './ascend_no_such_module.asc' not found");
 }
 
 TEST(interp_check_only_mode) {

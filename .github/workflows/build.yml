@@ -48,14 +48,16 @@ jobs:
       - name: Test
         run: ctest --test-dir build --build-config Release --output-on-failure
 
-      - name: Upload the interpreter
+      - name: Upload the interpreter and package manager
         if: ${{ matrix.artifact }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
             build/ascend
+            build/apkg
             build/Release/ascend.exe
+            build/Release/apkg.exe
           if-no-files-found: error
 
   sanitizers:

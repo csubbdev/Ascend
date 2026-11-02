@@ -2,6 +2,7 @@
 
 #include "lexer.hpp"
 #include "numeric.hpp"
+#include "packages.hpp"
 #include "parser.hpp"
 #include "runner.hpp"
 #include "semantic_analyzer.hpp"
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -175,6 +177,13 @@ bool hasExtension(const std::string& path) {
     size_t slash = path.find_last_of("/\\");
     size_t dot = path.find_last_of('.');
     return dot != std::string::npos && (slash == std::string::npos || dot > slash);
+}
+
+// import("colors") or import("colors/extra") may name an installed package;
+// import("./helpers") and import("/abs/path") are always files.
+bool mayBePackage(const std::string& path) {
+    if (path.empty() || path[0] == '.' || isAbsolutePath(path)) return false;
+    return isValidPackageName(path.substr(0, path.find('/')));
 }
 
 }  // namespace
@@ -427,6 +436,24 @@ std::string Interpreter::importDirectory() const {
 Value Interpreter::importModule(const std::string& path) {
     std::string resolved = isAbsolutePath(path) ? path : importDirectory() + path;
     if (!hasExtension(resolved)) resolved += ".asc";
+
+    // Not a file next to the importing one: look for an installed package.
+    std::error_code ignored;
+    if (!std::filesystem::is_regular_file(resolved, ignored) && mayBePackage(path)) {
+        std::filesystem::path found;
+        std::string problem;
+        std::string directory = importDirectory();
+        std::filesystem::path from = directory.empty() ? std::filesystem::current_path() : std::filesystem::path(directory);
+        if (findPackageModule(*this, path, from, found, problem)) {
+            resolved = found.string();
+        } else {
+            std::string name = path.substr(0, path.find('/'));
+            if (!problem.empty()) throw RuntimeError("can't import \"" + path + "\": " + problem);
+            throw RuntimeError("can't import \"" + path + "\": there's no file '" + resolved +
+                               "' and no installed package named '" + name + "' (to install it, run: apkg install " +
+                               name + ")");
+        }
+    }
 
     auto cached = modules_.find(resolved);
     if (cached != modules_.end()) return cached->second;
