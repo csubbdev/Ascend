@@ -1,5 +1,7 @@
 #include "stack_limit.hpp"
 
+#include "big_stack.hpp"
+
 #include <algorithm>
 
 #if defined(_WIN32)
@@ -45,6 +47,8 @@ size_t availableStack() {
     uintptr_t here = stackPosition();
     return here > low ? static_cast<size_t>(here - low) : 0;
 #elif defined(__unix__) || defined(__APPLE__)
+    // A thread started with a large stack knows its size.
+    if (size_t known = knownThreadStackSize()) return known;
     // The main thread's stack can grow up to the soft limit; the interpreter
     // starts near the top of it.
     struct rlimit limit;

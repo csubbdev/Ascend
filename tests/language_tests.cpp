@@ -479,3 +479,190 @@ TEST(lang_list_helpers) {
     CHECK_ERROR("median([1, \"x\"])", "median() needs a list of numbers, but it contains a string");
     CHECK_ERROR("chunk([1], 0)", "chunk() size must be at least 1");
 }
+
+// ---------------------------------------------------------------------------
+// Tracebacks, inheritance, operators, typed collections
+
+TEST(lang_tracebacks) {
+    const char* program =
+        "f64 divide(f64 a, f64 b) {\n"
+        "    if (b == 0) throw \"can't divide by zero\"\n"
+        "    return a / b\n"
+        "}\n"
+        "func average(list xs) { return divide(sum(xs), len(xs)) }\n"
+        "print(map([[1, 2], []], g => average(g)))\n";
+    std::string err = error(program);
+    CHECK(contains(err, "test.asc:2:17: runtime error: uncaught error: can't divide by zero"));
+    CHECK(contains(err, "  in divide(), called from test.asc:5:32\n"));
+    CHECK(contains(err, "  in average(), called from test.asc:6:30\n"));
+    CHECK(contains(err, "  in an anonymous function, called by a builtin\n"));
+    CHECK(contains(err, "  in map(), called from test.asc:6:7\n"));
+    // Caught errors leave no traceback behind.
+    std::string caught = error("func f() { return [][0] }\ntry { f() } catch e { }\nx := 1 / 0");
+    CHECK(contains(caught, "division by zero"));
+    CHECK(!contains(caught, "  in f()"));
+    // Deep recursion is summarized.
+    std::string deep = error("func f(n) { return n == 0 ? 1 / 0 : f(n - 1) }\nf(50)");
+    CHECK(contains(deep, "  in f(), called from test.asc:1:37\n    (and 49 more times)\n  in f(), called from test.asc:2:1\n"));
+}
+
+TEST(lang_inheritance) {
+    const char* animals =
+        "struct Animal {\n"
+        "    string name\n"
+        "    i32 legs = 4\n"
+        "    string sound() { return \"...\" }\n"
+        "    string describe() { return f\"{this.name} says {this.sound()}\" }\n"
+        "}\n"
+        "struct Dog : Animal {\n"
+        "    string breed = \"mutt\"\n"
+        "    string sound() { return \"Woof\" }\n"
+        "    string describe() { return super.describe() + \" (\" + this.breed + \")\" }\n"
+        "}\n"
+        "struct Bird : Animal {\n"
+        "    void init() { this.legs = 2 }\n"
+        "    string sound() { return \"Tweet\" }\n"
+        "}\n";
+    std::string base = animals;
+    CHECK_OUTPUT(base + "d := Dog(\"Rex\", breed: \"beagle\")\nprint(d.describe(), d.legs)", "Rex says Woof (beagle) 4\n");
+    CHECK_OUTPUT(base + "b := Bird(\"Tweety\")\nprint(b.describe(), b.legs, b)",
+                 "Tweety says Tweet 2 Bird{name: \"Tweety\", legs: 2}\n");
+    CHECK_OUTPUT(base + "Animal a = Dog(\"Rex\")\nfunc greet(Animal x) { return x.name }\nprint(type(a), greet(Bird(\"B\")))",
+                 "Dog B\n");
+    CHECK_OUTPUT(base + "d := Dog(\"Rex\")\nprint(is_a(d, Animal), is_a(d, Dog), is_a(d, Bird), is_a(d, \"Animal\"), is_a(5, \"int\"))",
+                 "true true false true true\n");
+    CHECK_ERROR(base + "Dog d = Bird(\"B\")", "'d' is declared as Dog, so it can't hold a Bird");
+    CHECK_ERROR("struct A { i32 x }\nstruct B : A { i32 x }", "struct B can't declare 'x' again: it already has it from A");
+    CHECK_ERROR("struct B : Missing { }", "unknown type 'Missing'");
+    CHECK_ERROR("struct A { f() { return super.f() } }\nA().f()", "'super' can only be used in the methods of a struct that extends another");
+}
+
+TEST(lang_operator_overloading) {
+    const char* vec =
+        "struct Vec {\n"
+        "    f64 x\n"
+        "    f64 y\n"
+        "    Vec operator+(Vec o) { return Vec(this.x + o.x, this.y + o.y) }\n"
+        "    Vec operator*(f64 k) { return Vec(this.x * k, this.y * k) }\n"
+        "    bool operator==(Vec o) { return this.x == o.x and this.y == o.y }\n"
+        "    bool operator<(Vec o) { return this.length() < o.length() }\n"
+        "    f64 operator[](i32 i) { return i == 0 ? this.x : this.y }\n"
+        "    f64 length() { return hypot(this.x, this.y) }\n"
+        "    string to_string() { return f\"({this.x}, {this.y})\" }\n"
+        "}\n";
+    std::string base = vec;
+    CHECK_OUTPUT(base + "v := Vec(1, 2) + Vec(3, 4) * 2\nprint(v, v[0], v[1])", "(7.0, 10.0) 7.0 10.0\n");
+    CHECK_OUTPUT(base + "v := Vec(3, 4)\nprint(v == Vec(3, 4), v != Vec(3, 4), Vec(1, 1) < v, v > Vec(1, 1), v <= v, v >= Vec(9, 9))",
+                 "true false true true true false\n");
+    CHECK_OUTPUT(base + "v := Vec(1, 1)\nv += Vec(1, 2)\nprint(v, [v], f\"{v}\", \"v=\" + v, str(v))",
+                 "(2.0, 3.0) [(2.0, 3.0)] (2.0, 3.0) v=(2.0, 3.0) (2.0, 3.0)\n");
+    CHECK_OUTPUT(base + "print(sort([Vec(3, 3), Vec(1, 0), Vec(2, 2)]), max([Vec(3, 3), Vec(1, 0)]), Vec(1, 0) in [Vec(1, 0)])",
+                 "[(1.0, 0.0), (2.0, 2.0), (3.0, 3.0)] (3.0, 3.0) true\n");
+    CHECK_ERROR("struct P { i32 x }\nsort([P(1), P(2)])", "can't compare a P with a P (give the struct an operator< method to sort it)");
+    CHECK_ERROR("struct P { to_string() { return 5 } }\nprint(P())", "P.to_string() must return a string, not an int");
+    CHECK_ERROR("struct P { P operator+() { return this } }", "operator+ takes one parameter");
+}
+
+TEST(lang_custom_iteration) {
+    const char* countdown =
+        "struct Countdown {\n"
+        "    i32 from\n"
+        "    list iter() { return [this.from - i for i in 0..this.from] }\n"
+        "    i32 len() { return this.from }\n"
+        "    bool contains(i32 n) { return n >= 1 and n <= this.from }\n"
+        "}\n";
+    std::string base = countdown;
+    CHECK_OUTPUT(base + "c := Countdown(3)\nfor n in c print(n)\nprint([n * 10 for n in c], len(c), 2 in c, 5 in c)",
+                 "3\n2\n1\n[30, 20, 10] 3 true false\n");
+}
+
+TEST(lang_typed_collections) {
+    CHECK_OUTPUT("list<i32> xs = [1, 2]\nxs.push(3)\nxs[0] = 10\nxs.insert(0, 0)\nxs.extend([4])\nprint(xs)", "[0, 10, 2, 3, 4]\n");
+    CHECK_ERROR("list<i32> xs = [1]\nxs.push(\"two\")", "this is a list<i32>, so it can't hold a string");
+    CHECK_ERROR("list<i32> xs = [1]\nxs[0] = 2.5", "this is a list<i32>, so it can't hold 2.5");
+    CHECK_OUTPUT("list<f64> fs = [1, 2]\nprint(fs)", "[1.0, 2.0]\n");
+    CHECK_OUTPUT("map<string, i32> ages = {ada: 36}\nages[\"bob\"] = 40\nages.cy = 22\nprint(ages)", "{\"ada\": 36, \"bob\": 40, \"cy\": 22}\n");
+    CHECK_ERROR("map<string, i32> ages = {}\nages[\"x\"] = \"old\"", "this is a map<string, i32>, so its values can't be a string");
+    CHECK_ERROR("map<string, i32> ages = {}\nages[5] = 1", "this is a map<string, i32>, so its keys can't be 5");
+    CHECK_OUTPUT("list<list<i32>> grid = [[1, 2], [3]]\ngrid[1].push(4)\nprint(grid)", "[[1, 2], [3, 4]]\n");
+    CHECK_ERROR("list<list<i32>> grid = [[1]]\ngrid[0].push(\"x\")", "this is a list<i32>, so it can't hold a string");
+    // A list used as a list<T> stays one, whatever variable it's reached through.
+    CHECK_ERROR("plain := [1]\nlist<i32> typed = plain\nplain.push(\"x\")", "this is a list<i32>");
+    CHECK_ERROR("plain := [1]\nlist<i32> a = plain\nlist<string> b = plain", "can't hold a list<i32> (a list or map keeps the element types");
+    CHECK_OUTPUT("list<string> names\nnames.push(\"a\")\nprint(names, len(names))", "[\"a\"] 1\n");
+    CHECK_OUTPUT("func total(list<f64> values) { return sum(values) }\nprint(total([1, 2.5]))", "3.5\n");
+    CHECK_ERROR("func total(list<f64> values) { return sum(values) }\ntotal([\"x\"])",
+                "total() expects 'values' to be list<f64>, but got a list containing a string");
+    CHECK_OUTPUT("struct Team { list<string> members = [] }\nt := Team()\nt.members.push(\"ann\")\nprint(t)", "Team{members: [\"ann\"]}\n");
+    CHECK_ERROR("struct Team { list<string> members = [] }\nTeam().members.push(5)", "this is a list<string>, so it can't hold 5");
+    CHECK_ERROR("list<u8> small = [1, 300]", "'small' is declared as list<u8>, so it can't hold a list containing 300");
+    CHECK_ERROR("map<string i32> m", "expected ',' between the key and value types");
+    CHECK_OUTPUT("list<i32>? maybe = null\nprint(maybe)\nx := 3\nprint(x < 5, x > 2)", "null\ntrue true\n");
+}
+
+TEST(lang_deep_recursion_is_an_error) {
+    CHECK_ERROR("func forever(n) { return forever(n + 1) }\nforever(0)", "test.asc:1:26: runtime error:");
+}
+
+// ---------------------------------------------------------------------------
+// The scripting library
+
+TEST(lang_run_programs) {
+#if defined(_WIN32)
+    CHECK_OUTPUT("r := run(\"echo hello\")\nprint(r.code, trim(r.stdout), r.ok)", "0 hello true\n");
+    CHECK_OUTPUT("r := run(\"exit 3\")\nprint(r.code, r.ok)", "3 false\n");
+#else
+    CHECK_OUTPUT("r := run([\"echo\", \"hello\", \"world\"])\nprint(r.code, r.stdout, r.ok)", "0 hello world\n true\n");
+    CHECK_OUTPUT("r := run(\"echo out; echo err >&2; exit 3\")\nprint(r.code, repr(r.stdout), repr(r.stderr), r.ok)",
+                 "3 \"out\\n\" \"err\\n\" false\n");
+    CHECK_OUTPUT("print(run([\"cat\"], \"fed in\").stdout)", "fed in\n");
+#endif
+    CHECK_ERROR("run([\"ascend-no-such-program\"])", "run(): couldn't start 'ascend-no-such-program'");
+    CHECK_ERROR("run([])", "run(): the command list is empty");
+}
+
+TEST(lang_paths_and_folders) {
+    TempFiles files;
+    files.add("ascend_test_tree/inner/a.txt", "abc");
+    files.add("ascend_test_tree/b.txt", "hello");
+    CHECK_OUTPUT("print(path_join(\"a\", \"b\", \"c.txt\"), basename(\"/x/y/z.tar.gz\"), dirname(\"/x/y/z.txt\"), extension(\"p.JPG\"))",
+                 "a/b/c.txt z.tar.gz /x/y .JPG\n");
+    CHECK_OUTPUT("print(walk_dir(\"ascend_test_tree\"), file_size(\"ascend_test_tree/b.txt\"))", "[\"b.txt\", \"inner/a.txt\"] 5\n");
+    CHECK_OUTPUT("copy_file(\"ascend_test_tree/b.txt\", \"ascend_test_tree/c.txt\")\n"
+                 "move_file(\"ascend_test_tree/c.txt\", \"ascend_test_tree/d.txt\")\n"
+                 "print(list_dir(\"ascend_test_tree\"), read_file(\"ascend_test_tree/d.txt\"))",
+                 "[\"b.txt\", \"d.txt\", \"inner\"] hello\n");
+    CHECK_OUTPUT("print(remove_dir(\"ascend_test_tree/inner\"), is_dir(\"ascend_test_tree/inner\"), remove_dir(\"nope\"))",
+                 "true false false\n");
+    CHECK_OUTPUT("print(len(cwd()) > 0, is_dir(temp_dir()), platform() in [\"linux\", \"macos\", \"windows\", \"unix\"])",
+                 "true true true\n");
+    CHECK_OUTPUT("set_env(\"ASCEND_TEST_SETTING\", 42)\nprint(env(\"ASCEND_TEST_SETTING\"))", "42\n");
+    CHECK_ERROR("file_size(\"ascend_no_such_file\")", "file_size(): 'ascend_no_such_file':");
+}
+
+TEST(lang_text_math_and_sets) {
+    CHECK_OUTPUT("print(capitalize(\"hello world\"), title(\"hello big-world\"), \"[\" + trim_start(\"  x \") + \"]\", \"[\" + trim_end(\"  x \") + \"]\")",
+                 "Hello world Hello Big-World [x ] [  x]\n");
+    CHECK_OUTPUT("print(last_index_of(\"banana\", \"an\"), last_index_of([1, 2, 1], 1), last_index_of(\"héllo\", 'l'), last_index_of(\"x\", \"y\"))",
+                 "3 2 3 -1\n");
+    CHECK_OUTPUT("print(lcm(4, 6), factorial(10), degrees(PI), radians(180), trunc(-3.7), trunc(5))",
+                 "12 3628800 180.0 3.141592653589793 -3 5\n");
+    CHECK_ERROR("factorial(21)", "factorial(21) is too large for an int");
+    CHECK_OUTPUT("print(union([1, 2, 2], [2, 3]), intersect([1, 2, 3, 2], [2, 3, 4]), difference([1, 2, 3], [2]))",
+                 "[1, 2, 3] [2, 3] [1, 3]\n");
+}
+
+TEST(lang_dates_csv_and_encodings) {
+    CHECK_OUTPUT("n := now()\nprint(n.year > 2000, n.month in 1..=12, n.weekday in 0..7, type(n.timestamp))", "true true true float\n");
+    CHECK_OUTPUT("print(format_time(86400 * 365, \"%Y\") in [\"1970\", \"1971\"])", "true\n");
+    CHECK_OUTPUT("rows := csv_parse(\"name,age\\n\\\"Smith, John\\\",42\\n\\\"say \\\"\\\"hi\\\"\\\"\\\",7\\n\")\nprint(rows)",
+                 "[[\"name\", \"age\"], [\"Smith, John\", \"42\"], [\"say \\\"hi\\\"\", \"7\"]]\n");
+    CHECK_OUTPUT("print(repr(csv_stringify([[\"a\", \"b, c\"], [1, \"say \\\"hi\\\"\"]])))", "\"a,\\\"b, c\\\"\\n1,\\\"say \\\"\\\"hi\\\"\\\"\\\"\\n\"\n");
+    CHECK_OUTPUT("print(csv_parse(\"a;b\\r\\nc;d\", ';'))", "[[\"a\", \"b\"], [\"c\", \"d\"]]\n");
+    CHECK_ERROR("csv_parse(\"\\\"open\")", "csv_parse(): a quoted field is never closed");
+    CHECK_OUTPUT("print(base64_encode(\"Hello, Ascend!\"), base64_decode(\"SGVsbG8sIEFzY2VuZCE=\"), base64_encode(\"a\"), base64_encode(\"ab\"))",
+                 "SGVsbG8sIEFzY2VuZCE= Hello, Ascend! YQ== YWI=\n");
+    CHECK_ERROR("base64_decode(\"*\")", "base64_decode(): '*' isn't base64");
+    CHECK_OUTPUT("print(sha256(\"abc\"))", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n");
+    CHECK_OUTPUT("id := uuid()\nprint(len(id), id[14], id[8], uuid() != id)", "36 4 - true\n");
+}

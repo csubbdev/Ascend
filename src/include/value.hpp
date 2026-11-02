@@ -109,15 +109,28 @@ private:
 
 struct ListObj final : GcObject {
     std::vector<Value> items;
+    // Set once the list has been used as a list<T>: every item is a T, and
+    // stays one (push, insert and assignments are checked).
+    std::shared_ptr<const TypeSpec> elementType;
 
     void forEachChild(const std::function<void(GcObject*)>& visit) const override;
     void clearReferences() override { items.clear(); }
 };
 
-// The fields of a struct type, in declaration order.
+// The fields of a struct type, in declaration order (inherited ones first).
 struct StructInfo {
     std::string name;
     std::vector<std::pair<std::string, TypeSpec>> fields;
+    std::vector<std::string> ancestors;  // the struct it extends, that one's parent, ...
+
+    // True for this struct and the structs it extends.
+    bool isA(const std::string& type) const {
+        if (type == name) return true;
+        for (const auto& ancestor : ancestors) {
+            if (ancestor == type) return true;
+        }
+        return false;
+    }
 
     // The declared type of a field, or nullptr if there's no such field.
     const TypeSpec* fieldType(const std::string& field) const {
@@ -138,6 +151,9 @@ struct MapObj final : GcObject {
     std::vector<std::pair<Value, Value>> entries;
     std::shared_ptr<StructType> structType;  // the struct it's a value of; null for ordinary maps
     std::string frozenAs;  // set for enums, whose members can't change: "enum Color"
+    // Set once the map has been used as a map<K, V> (like ListObj::elementType).
+    std::shared_ptr<const TypeSpec> keyType;
+    std::shared_ptr<const TypeSpec> valueType;
 
     const StructInfo* structInfo() const;  // the struct's fields, or nullptr
 
@@ -200,7 +216,15 @@ struct FunctionObj final : Callable, GcObject {
 
 // A struct type, which is called to make values: Point(1, 2). It keeps the
 // scope it was declared in, where the fields' default values are evaluated.
+struct StructField;
+
 struct StructType final : Callable, GcObject {
+    // A field and the struct that declared it (whose scope its default is evaluated in).
+    struct FieldRef {
+        const StructField* field;
+        const StructType* owner;
+    };
+
     StructType(std::shared_ptr<const StructInfo> info, const StructStmt* declaration,
                std::shared_ptr<Environment> closure, const SourceFile* source)
         : Callable(Kind::Struct),
@@ -214,6 +238,7 @@ struct StructType final : Callable, GcObject {
     void clearReferences() override {
         closure.reset();
         methods.clear();
+        parent.reset();
     }
 
     // A method by name, or nullptr.
@@ -228,8 +253,27 @@ struct StructType final : Callable, GcObject {
     const StructStmt* declaration;  // owned by the interpreter's list of programs
     std::shared_ptr<Environment> closure;
     const SourceFile* source;
-    std::vector<std::pair<std::string, Value>> methods;  // functions taking `this` first
+    std::vector<std::pair<std::string, Value>> methods;  // functions taking `this` first (inherited ones too)
+    std::shared_ptr<StructType> parent;                   // the struct this one extends, if any
+    std::vector<FieldRef> fields;                         // every field, inherited ones first
 };
+
+// Lets the interpreter supply struct methods (to_string, operator== and
+// operator<) to code that has no interpreter: printing, comparing, sorting.
+class ValueHooks {
+public:
+    virtual ~ValueHooks() = default;
+    // Each returns false if the value has no such method.
+    virtual bool customString(const Value& value, std::string& out) = 0;
+    virtual bool customEqual(const Value& a, const Value& b, bool& out) = 0;
+    virtual bool customCompare(const Value& a, const Value& b, int& out) = 0;
+};
+
+// The hooks of the interpreter running on this thread (or null).
+ValueHooks*& activeValueHooks();
+
+// The struct value's method `name`, or nullptr (for any other value too).
+const Value* structMethod(const Value& value, const std::string& name);
 
 inline const StructInfo* MapObj::structInfo() const { return structType ? structType->info.get() : nullptr; }
 

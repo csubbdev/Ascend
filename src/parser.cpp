@@ -234,7 +234,8 @@ StmtPtr Parser::statement() {
                 return fromImportStatement(token);
             }
             if ((isWord(0, "struct") || isWord(0, "enum")) && next == TokenType::Identifier &&
-                (peek(2).type == TokenType::LeftBrace || peek(2).type == TokenType::Newline)) {
+                (peek(2).type == TokenType::LeftBrace || peek(2).type == TokenType::Newline ||
+                 (token.lexeme == "struct" && peek(2).type == TokenType::Colon))) {
                 advance();
                 return token.lexeme == "struct" ? structDeclaration(token) : enumDeclaration(token);
             }
@@ -641,6 +642,9 @@ std::string Parser::modulePath(std::string& lastPart) {
 StmtPtr Parser::structDeclaration(const Token& keyword) {
     auto stmt = nodeAt<StructStmt>(keyword);
     stmt->name = consume(TokenType::Identifier, "a name after 'struct'").lexeme;
+    if (match(TokenType::Colon)) {  // struct Dog : Animal
+        stmt->parent = consume(TokenType::Identifier, "the name of the struct to extend after ':'").lexeme;
+    }
     skipNewlines();
     const Token& open = consume(TokenType::LeftBrace, "'{' to start the struct's fields");
     NestingGuard guard(*this, open);
@@ -649,13 +653,17 @@ StmtPtr Parser::structDeclaration(const Token& keyword) {
         if (check(TokenType::RightBrace) || isAtEnd()) break;
         size_t start = current_;
         try {
-            // Methods: `f64 area() { ... }`, `func describe() { ... }` or `reset() { ... }`.
+            // Methods: `f64 area() { ... }`, `func describe() { ... }`, `reset() { ... }`,
+            // and operators: `Vec operator+(Vec other) { ... }`.
+            std::string opName;
             size_t length = typeLength(0, true);
-            bool typedMethod = !check(TokenType::Func) && length > 0 && peek(length).type == TokenType::Identifier &&
-                               peek(length + 1).type == TokenType::LeftParen;
-            bool untypedMethod = (check(TokenType::Func) && peek(1).type == TokenType::Identifier &&
-                                  peek(2).type == TokenType::LeftParen) ||
-                                 (check(TokenType::Identifier) && peek(1).type == TokenType::LeftParen);
+            bool typedMethod = !check(TokenType::Func) && !isWord(0, "operator") && length > 0 &&
+                               ((peek(length).type == TokenType::Identifier && peek(length + 1).type == TokenType::LeftParen) ||
+                                operatorName(length, opName) > 0);
+            size_t afterFunc = check(TokenType::Func) ? 1 : 0;
+            bool untypedMethod = !typedMethod && ((peek(afterFunc).type == TokenType::Identifier &&
+                                                   peek(afterFunc + 1).type == TokenType::LeftParen) ||
+                                                  operatorName(afterFunc, opName) > 0);
             if (typedMethod || untypedMethod) {
                 TypeSpec returnType;
                 if (typedMethod) {
@@ -663,10 +671,17 @@ StmtPtr Parser::structDeclaration(const Token& keyword) {
                 } else {
                     match(TokenType::Func);
                 }
-                const Token& name = advance();
-                auto method = functionRest(name, stmt->name + "." + name.lexeme, typedMethod ? &returnType : nullptr);
+                const Token& nameToken = peek();
+                std::string name;
+                size_t count = operatorName(0, name);
+                if (count > 0) {
+                    for (size_t i = 0; i < count; ++i) advance();
+                } else {
+                    name = advance().lexeme;
+                }
+                auto method = functionRest(nameToken, stmt->name + "." + name, typedMethod ? &returnType : nullptr);
                 addThisParameter(*method);
-                stmt->methods.emplace_back(name.lexeme, std::move(method));
+                stmt->methods.emplace_back(name, std::move(method));
                 continue;
             }
 
@@ -703,6 +718,32 @@ StmtPtr Parser::structDeclaration(const Token& keyword) {
     }
     advance();
     return stmt;
+}
+
+// `operator+`, `operator==`, `operator[]`... starting `offset` tokens ahead and
+// followed by '('. Returns how many tokens the name takes (0 if it isn't one).
+size_t Parser::operatorName(size_t offset, std::string& name) const {
+    if (!isWord(offset, "operator")) return 0;
+    const Token& symbol = peek(offset + 1);
+    switch (symbol.type) {
+        case TokenType::Plus:
+        case TokenType::Minus:
+        case TokenType::Star:
+        case TokenType::Slash:
+        case TokenType::Percent:
+        case TokenType::StarStar:
+        case TokenType::EqualEqual:
+        case TokenType::Less:
+            if (peek(offset + 2).type != TokenType::LeftParen) return 0;
+            name = "operator" + symbol.lexeme;
+            return 2;
+        case TokenType::LeftBracket:
+            if (peek(offset + 2).type != TokenType::RightBracket || peek(offset + 3).type != TokenType::LeftParen) return 0;
+            name = "operator[]";
+            return 3;
+        default:
+            return 0;
+    }
 }
 
 // enum Color { Red, Green = 5, Blue }
@@ -802,7 +843,29 @@ size_t Parser::typeLength(size_t offset, bool allowStruct) const {
     bool isType = token.type == TokenType::Func ||
                   (token.type == TokenType::Identifier && (allowStruct || lookupType(token.lexeme, type)));
     if (!isType) return 0;
-    return peek(offset + 1).type == TokenType::Question ? 2 : 1;
+    size_t length = 1;
+    // list<i32>, map<string, list<f64>>
+    if ((token.lexeme == "list" || token.lexeme == "map") && peek(offset + 1).type == TokenType::Less) {
+        int depth = 0;
+        size_t i = offset + 1;
+        for (;; ++i) {
+            TokenType kind = peek(i).type;
+            if (kind == TokenType::Less) {
+                ++depth;
+            } else if (kind == TokenType::Greater) {
+                --depth;
+            } else if (kind == TokenType::ShiftRight) {
+                depth -= 2;
+            } else if (kind != TokenType::Identifier && kind != TokenType::Comma && kind != TokenType::Question &&
+                       kind != TokenType::Func) {
+                return 0;
+            }
+            if (depth <= 0) break;
+        }
+        if (depth < 0) return 0;
+        length = i - offset + 1;
+    }
+    return peek(offset + length).type == TokenType::Question ? length + 1 : length;
 }
 
 // After `Name name` or `Name? name` at the start of a statement: is it a
@@ -978,6 +1041,25 @@ TypeSpec Parser::parseType(bool allowVoid, bool allowStruct) {
     }
     if (type.kind == TypeKind::Void && !allowVoid) error(token, "'void' can only be used as a return type");
     advance();
+    // list<i32> and map<string, f64>: the types of the elements.
+    if ((type.kind == TypeKind::List || type.kind == TypeKind::Map) && match(TokenType::Less)) {
+        if (type.kind == TypeKind::Map) {
+            type.key = std::make_shared<TypeSpec>(parseType(false, true));
+            consume(TokenType::Comma, "',' between the key and value types, like map<string, i32>");
+        }
+        type.element = std::make_shared<TypeSpec>(parseType(false, true));
+        if (check(TokenType::ShiftRight)) {
+            // The '>>' in list<list<i32>> closes two lists: use one '>' here, leave one.
+            Token& shift = tokens_[current_];
+            shift.type = TokenType::Greater;
+            shift.lexeme = ">";
+            ++shift.column;
+        } else {
+            consume(TokenType::Greater, type.kind == TypeKind::Map ? "'>' after the value type" : "'>' after the element type");
+        }
+    } else if (type.kind == TypeKind::Map && check(TokenType::Less)) {
+        error(peek(), "write map types like map<string, i32>");
+    }
     if (match(TokenType::Question)) {
         if (type.kind == TypeKind::Any || type.kind == TypeKind::Void) {
             error(previous(), "'" + name + "' can't be made nullable with '?'");

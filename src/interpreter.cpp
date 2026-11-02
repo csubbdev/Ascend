@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <limits>
 #include <unordered_map>
@@ -244,17 +245,28 @@ bool mayBePackage(const std::string& path) {
 
 // Switches the current function and source file for the duration of a call,
 // and restores them afterwards, even when an error unwinds the call.
+//
+// When an error unwinds through a call, the guard adds the call to the
+// traceback (`label` names the function, `line`/`column` the call site).
 class Interpreter::FrameGuard {
 public:
-    FrameGuard(Interpreter& interpreter, const SourceFile* source, const FunctionExpr* function)
+    FrameGuard(Interpreter& interpreter, const SourceFile* source, const FunctionExpr* function,
+               const std::string* name = nullptr, int line = 0, int column = 0)
         : interpreter_(interpreter),
           savedSource_(interpreter.currentSource_),
-          savedFunction_(interpreter.currentFunction_) {
+          savedFunction_(interpreter.currentFunction_),
+          name_(name),
+          line_(line),
+          column_(column) {
         interpreter_.currentSource_ = source;
         interpreter_.currentFunction_ = function;
         ++interpreter_.callDepth_;
     }
     ~FrameGuard() {
+        if (name_ != nullptr && std::uncaught_exceptions() > 0) {
+            interpreter_.trace_.push_back(
+                {name_->empty() ? "an anonymous function" : *name_ + "()", savedSource_, line_, column_});
+        }
         interpreter_.currentSource_ = savedSource_;
         interpreter_.currentFunction_ = savedFunction_;
         --interpreter_.callDepth_;
@@ -268,7 +280,34 @@ private:
     Interpreter& interpreter_;
     const SourceFile* savedSource_;
     const FunctionExpr* savedFunction_;
+    const std::string* name_;  // the function's name, for tracebacks (null: not a call)
+    int line_;
+    int column_;
 };
+
+namespace {
+
+// Adds a builtin to the traceback when an error from a function it called
+// (like the callback given to map()) unwinds through it.
+class NativeFrame {
+public:
+    NativeFrame(std::vector<TraceFrame>& trace, const std::string& name, const SourceFile* source, int line, int column)
+        : trace_(trace), name_(name), source_(source), line_(line), column_(column) {}
+    ~NativeFrame() {
+        if (!trace_.empty() && std::uncaught_exceptions() > 0) trace_.push_back({name_ + "()", source_, line_, column_});
+    }
+    NativeFrame(const NativeFrame&) = delete;
+    NativeFrame& operator=(const NativeFrame&) = delete;
+
+private:
+    std::vector<TraceFrame>& trace_;
+    const std::string& name_;
+    const SourceFile* source_;
+    int line_;
+    int column_;
+};
+
+}  // namespace
 
 // Notes where a runtime error happened, as the error unwinds through the
 // expressions and statements being evaluated: the innermost one is the
@@ -305,6 +344,8 @@ Interpreter::Interpreter(std::ostream& out, std::istream& in)
     } catch (...) {
         random_.seed(static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()));
     }
+    previousHooks_ = activeValueHooks();
+    activeValueHooks() = &hooks_;
     builtins_ = newEnvironment(nullptr);
     globals_ = newEnvironment(builtins_);
     registerStandardLibrary(*this);
@@ -312,6 +353,7 @@ Interpreter::Interpreter(std::ostream& out, std::istream& in)
 }
 
 Interpreter::~Interpreter() {
+    activeValueHooks() = previousHooks_;
     // Break every remaining reference cycle so all memory is released.
     modules_.clear();
     std::vector<std::shared_ptr<GcObject>> live;
@@ -455,6 +497,7 @@ void Interpreter::execute(std::unique_ptr<Program> program, std::unique_ptr<Sour
     const SourceFile* saved = currentSource_;
     currentSource_ = sources_.back().get();
     clearErrorSite();
+    trace_.clear();
     try {
         runTopLevel(*programs_.back(), globals_, replMode_);
     } catch (RuntimeError& error) {
@@ -706,8 +749,17 @@ Value Interpreter::zeroValue(const TypeSpec& type, const EnvPtr& env) {
             return isFloatKind(type.num) ? Value::fromFloat(0.0, type.num) : Value::fromInt(0, type.num);
         case TypeKind::Char: return Value::fromChar(0);
         case TypeKind::String: return Value::fromString("");
-        case TypeKind::List: return Value::fromList(newList());
-        case TypeKind::Map: return Value::fromMap(newMap());
+        case TypeKind::List: {
+            auto list = newList();
+            list->elementType = type.element;
+            return Value::fromList(list);
+        }
+        case TypeKind::Map: {
+            auto map = newMap();
+            map->keyType = type.key;
+            map->valueType = type.element;
+            return Value::fromMap(map);
+        }
         case TypeKind::Struct: {
             Variable* variable = env->find(type.structName);
             if (variable == nullptr || !variable->value.isFunction() ||
@@ -746,10 +798,15 @@ TypeSpec typeOfValue(const Value& value) {
             break;
         case Value::Type::Char: type.kind = TypeKind::Char; break;
         case Value::Type::String: type.kind = TypeKind::String; break;
-        case Value::Type::List: type.kind = TypeKind::List; break;
+        case Value::Type::List:
+            type.kind = TypeKind::List;
+            type.element = value.asList().elementType;
+            break;
         case Value::Type::Map:
             if (value.asMap().structInfo()) return structType(value.asMap().structInfo()->name);
             type.kind = TypeKind::Map;
+            type.key = value.asMap().keyType;
+            type.element = value.asMap().valueType;
             break;
         case Value::Type::Function: type.kind = TypeKind::Function; break;
     }
@@ -953,7 +1010,7 @@ Interpreter::Flow Interpreter::execFor(const ForStmt& loop, const EnvPtr& env) {
         }
     }
 
-    Value iterable = eval(*loop.iterable, env);
+    Value iterable = this->iterable(eval(*loop.iterable, env));
     switch (iterable.type()) {
         case Value::Type::List: {
             // Index-based so the body may safely add or remove elements.
@@ -1221,6 +1278,7 @@ Interpreter::Flow Interpreter::execTry(const TryStmt& stmt, const EnvPtr& env) {
         Flow override = runFinally();
         if (override != Flow::Normal) {  // a return or break in finally replaces the error
             clearErrorSite();
+            trace_.clear();
             return override;
         }
         throw;
@@ -1236,8 +1294,10 @@ Interpreter::Flow Interpreter::execTryCatch(const TryStmt& stmt, const EnvPtr& e
         return execScoped(stmt.body, env);
     } catch (const RuntimeError& error) {
         clearErrorSite();  // handled, so where it happened no longer matters
+        trace_.clear();
         caught = Value::fromString(error.what());
     } catch (const ThrownValue& thrown) {
+        trace_.clear();
         caught = thrown.value;
     }
     auto scope = newEnvironment(env);
@@ -1417,7 +1477,7 @@ Value Interpreter::evalComprehension(const ComprehensionExpr& expr, const EnvPtr
             if (eval(*clause.expr, scope).truthy()) run(index + 1, scope);
             return;
         }
-        Value iterable = eval(*clause.expr, scope);
+        Value iterable = this->iterable(eval(*clause.expr, scope));
         ErrorSite site(*this, clause.expr->line, clause.expr->column);
         forEachElement(iterable, [&](Value key, Value item) {
             auto inner = newEnvironment(scope);
@@ -1627,7 +1687,27 @@ Value Interpreter::evalCall(const CallExpr& expr, const EnvPtr& env) {
     std::vector<Value> args;
     args.reserve(expr.args.size() + 1);
 
-    if (expr.callee->kind == ExprKind::Member) {
+    const bool superCall = expr.callee->kind == ExprKind::Member &&
+                           expr.callee->as<MemberExpr>().object->kind == ExprKind::Variable &&
+                           expr.callee->as<MemberExpr>().object->as<VariableExpr>().name == "super";
+    if (superCall) {
+        // super.name(...): the method of the struct this one extends, on `this`.
+        const auto& member = expr.callee->as<MemberExpr>();
+        Variable* parent = env->find("super");
+        Variable* self = env->find("this");
+        if (parent == nullptr || self == nullptr || !parent->value.isFunction() ||
+            parent->value.asFunction().kind != Callable::Kind::Struct) {
+            throw RuntimeError("'super' can only be used in the methods of a struct that extends another", member.line,
+                               member.column);
+        }
+        const auto& parentType = static_cast<const StructType&>(parent->value.asFunction());
+        const Value* method = parentType.method(member.name);
+        if (method == nullptr) {
+            throw RuntimeError(parentType.info->name + " has no method '" + member.name + "'", member.line, member.column);
+        }
+        callee = *method;
+        args.push_back(self->value);
+    } else if (expr.callee->kind == ExprKind::Member) {
         const auto& member = expr.callee->as<MemberExpr>();
         Value object = eval(*member.object, env);
         if (member.optional && object.isNull()) return Value();  // a?.f() does nothing when a is null
@@ -1692,12 +1772,87 @@ Value Interpreter::makeFunction(const FunctionExpr& expr, const EnvPtr& env, con
 Value Interpreter::makeStruct(const StructStmt& stmt, const EnvPtr& env) {
     auto info = std::make_shared<StructInfo>();
     info->name = stmt.name;
-    for (const auto& field : stmt.fields) info->fields.emplace_back(field.name, field.type);
+    std::shared_ptr<StructType> parent;
+    if (!stmt.parent.empty()) {
+        Variable* found = env->find(stmt.parent);
+        if (found == nullptr || !found->value.isFunction() || found->value.asFunction().kind != Callable::Kind::Struct) {
+            throw RuntimeError("struct " + stmt.name + " extends '" + stmt.parent +
+                               "', which isn't a struct (declare it before " + stmt.name + ")");
+        }
+        parent = std::static_pointer_cast<StructType>(found->value.functionPtr());
+        info->fields = parent->info->fields;
+        info->ancestors.push_back(parent->info->name);
+        info->ancestors.insert(info->ancestors.end(), parent->info->ancestors.begin(), parent->info->ancestors.end());
+    }
+    for (const auto& field : stmt.fields) {
+        if (parent != nullptr && parent->info->fieldType(field.name) != nullptr) {
+            throw RuntimeError("struct " + stmt.name + " can't declare '" + field.name + "' again: it already has it from " +
+                                   stmt.parent,
+                               field.line, field.column);
+        }
+        info->fields.emplace_back(field.name, field.type);
+    }
     auto type = track(std::make_shared<StructType>(info, &stmt, env, currentSource_));
+    if (parent != nullptr) {
+        type->parent = parent;
+        type->fields = parent->fields;
+        type->methods = parent->methods;  // inherited; the struct's own methods replace them
+    }
+    for (const auto& field : stmt.fields) type->fields.push_back({&field, type.get()});
+    // A struct's own methods can call the ones it replaced with super.name().
+    EnvPtr methodScope = env;
+    if (parent != nullptr) {
+        methodScope = newEnvironment(env);
+        methodScope->define("super", Value::fromFunction(parent));
+    }
     for (const auto& method : stmt.methods) {
-        type->methods.emplace_back(method.first, makeFunction(*method.second, env, method.second->name));
+        Value function = makeFunction(*method.second, methodScope, method.second->name);
+        bool replaced = false;
+        for (auto& existing : type->methods) {
+            if (existing.first == method.first) {
+                existing.second = function;
+                replaced = true;
+            }
+        }
+        if (!replaced) type->methods.emplace_back(method.first, function);
     }
     return Value::fromFunction(type);
+}
+
+bool Interpreter::Hooks::customString(const Value& value, std::string& out) {
+    const Value* method = structMethod(value, "to_string");
+    if (method == nullptr) return false;
+    Value result = interpreter_.call(*method, {value});
+    if (!result.isString()) {
+        throw RuntimeError(value.asMap().structInfo()->name + ".to_string() must return a string, not " +
+                           aTypeName(result));
+    }
+    out = result.asString();
+    return true;
+}
+
+bool Interpreter::Hooks::customEqual(const Value& a, const Value& b, bool& out) {
+    const Value* method = structMethod(a, "operator==");
+    if (method == nullptr) return false;
+    out = interpreter_.call(*method, {a, b}).truthy();
+    return true;
+}
+
+bool Interpreter::Hooks::customCompare(const Value& a, const Value& b, int& out) {
+    const Value* method = structMethod(a, "operator<");
+    if (method == nullptr) return false;
+    if (interpreter_.call(*method, {a, b}).truthy()) {
+        out = -1;
+    } else {
+        const Value* reverse = structMethod(b, "operator<");
+        out = reverse != nullptr && interpreter_.call(*reverse, {b, a}).truthy() ? 1 : 0;
+    }
+    return true;
+}
+
+Value Interpreter::iterable(const Value& value) {
+    const Value* iter = structMethod(value, "iter");
+    return iter != nullptr ? call(*iter, {value}) : value;
 }
 
 // Point(1, 2): the arguments fill the fields in order; fields left out get
@@ -1707,11 +1862,11 @@ Value Interpreter::constructStruct(const std::shared_ptr<StructType>& typePtr, s
     const StructType& type = *typePtr;
     const StructStmt& declaration = *type.declaration;
     const std::string& name = declaration.name;
-    if (args.size() > declaration.fields.size()) {
+    if (args.size() > type.fields.size()) {
         std::string fields;
-        for (const auto& field : declaration.fields) fields += (fields.empty() ? "" : ", ") + field.name;
-        throw RuntimeError(name + "() takes at most " + std::to_string(declaration.fields.size()) + " argument" +
-                               (declaration.fields.size() == 1 ? "" : "s") + (fields.empty() ? "" : " (" + fields + ")") +
+        for (const auto& field : type.fields) fields += (fields.empty() ? "" : ", ") + field.field->name;
+        throw RuntimeError(name + "() takes at most " + std::to_string(type.fields.size()) + " argument" +
+                               (type.fields.size() == 1 ? "" : "s") + (fields.empty() ? "" : " (" + fields + ")") +
                                ", but got " + std::to_string(args.size()),
                            line, column);
     }
@@ -1722,8 +1877,8 @@ Value Interpreter::constructStruct(const std::shared_ptr<StructType>& typePtr, s
     }
     checkStack();
 
-    // Point(1, y: 2): line the arguments up with the fields.
-    const size_t count = declaration.fields.size();
+    // Point(1, y: 2): line the arguments up with the fields (inherited ones first).
+    const size_t count = type.fields.size();
     std::vector<Value> slots(count);
     std::vector<bool> filled(count, false);
     for (size_t i = 0; i < args.size(); ++i) {
@@ -1732,25 +1887,26 @@ Value Interpreter::constructStruct(const std::shared_ptr<StructType>& typePtr, s
     }
     if (named != nullptr && !named->empty()) {
         std::vector<std::string> names;
-        for (const auto& field : declaration.fields) names.push_back(field.name);
+        for (const auto& field : type.fields) names.push_back(field.field->name);
         bindNamedArgs(name + "()", "field", names, *named, slots, filled, line, column);
     }
 
     auto object = newMap();
     object->structType = typePtr;
     EnvPtr scope;  // where default values are evaluated, made when first needed
-    FrameGuard frame(*this, type.source, nullptr);
+    FrameGuard frame(*this, type.source, nullptr, &name, line, column);
     for (size_t i = 0; i < count; ++i) {
-        const StructField& field = declaration.fields[i];
+        const StructField& field = *type.fields[i].field;
+        const StructType& owner = *type.fields[i].owner;
         Value value;
         if (filled[i]) {
             value = std::move(slots[i]);
         } else if (field.defaultValue) {
-            if (!scope) scope = newEnvironment(type.closure);
+            if (!scope || &owner != &type) scope = newEnvironment(owner.closure);
             value = eval(*field.defaultValue, scope);
         } else {
             ErrorSite site(*this, field.line, field.column);
-            value = zeroValue(field.type, type.closure);
+            value = zeroValue(field.type, owner.closure);
         }
         Value converted;
         CoerceFailure failure;
@@ -1775,6 +1931,7 @@ Value Interpreter::constructStruct(const std::shared_ptr<StructType>& typePtr, s
 
 void Interpreter::setElement(MapObj& map, const Value& key, Value value) {
     if (!map.frozenAs.empty()) throw RuntimeError("the members of " + map.frozenAs + " can't be changed");
+    if (map.valueType) checkMapEntry(map, key, value);
     if (map.structInfo()) {
         const StructInfo& info = *map.structInfo();
         const TypeSpec* type = key.isString() ? info.fieldType(key.asString()) : nullptr;
@@ -1816,9 +1973,11 @@ int Interpreter::runMain() {
 
     const SourceFile* saved = currentSource_;
     clearErrorSite();
+    trace_.clear();
     Value result;
     try {
         ErrorSite site(*this, declaration.line, declaration.column);
+        runningMain_ = true;  // main() has no call site to show in a traceback
         result = call(function, std::move(args), declaration.line, declaration.column);
     } catch (RuntimeError& error) {
         applyErrorSite(error);
@@ -1853,6 +2012,7 @@ Value Interpreter::call(const Value& callee, std::vector<Value> args, int line, 
                                line, column);
         }
         // Errors from the builtin are reported at the call (the enclosing ErrorSite).
+        NativeFrame frame(trace_, native.name, currentSource_, line, column);
         return native.fn(*this, args);
     }
 
@@ -1902,7 +2062,8 @@ Value Interpreter::call(const Value& callee, std::vector<Value> args, int line, 
 
     auto scope = newEnvironment(function.closure);
     {
-        FrameGuard frame(*this, function.source, &decl);
+        FrameGuard frame(*this, function.source, &decl, &function.name, runningMain_ ? -1 : line, column);
+        runningMain_ = false;
         for (size_t i = 0; i < decl.params.size(); ++i) {
             const Param& param = decl.params[i];
             if (i == fixed) {  // ...rest: the remaining arguments, as a list
@@ -1965,6 +2126,32 @@ Value Interpreter::call(const Value& callee, std::vector<Value> args, int line, 
 Value Interpreter::binaryOp(TokenType op, const Value& a, const Value& b) {
     NumOp numOp;
     if (toNumOp(op, numOp) && a.isNumber() && b.isNumber()) return numericOp(numOp, a, b);
+
+    // Structs can define operators: Vec operator+(Vec other) { ... }
+    if (a.isMap() && a.asMap().structType && !a.asMap().structType->methods.empty()) {
+        const char* name = nullptr;
+        switch (op) {
+            case TokenType::Plus: name = "operator+"; break;
+            case TokenType::Minus: name = "operator-"; break;
+            case TokenType::Star: name = "operator*"; break;
+            case TokenType::Slash: name = "operator/"; break;
+            case TokenType::Percent: name = "operator%"; break;
+            case TokenType::StarStar: name = "operator**"; break;
+            default: break;
+        }
+        if (name != nullptr) {
+            if (const Value* method = structMethod(a, name)) return call(*method, {a, b});
+        }
+        if (const Value* less = structMethod(a, "operator<")) {
+            switch (op) {
+                case TokenType::Less: return Value::fromBool(call(*less, {a, b}).truthy());
+                case TokenType::Greater: return Value::fromBool(compareValues(b, a) < 0);
+                case TokenType::LessEqual: return Value::fromBool(compareValues(b, a) >= 0);
+                case TokenType::GreaterEqual: return Value::fromBool(!call(*less, {a, b}).truthy());
+                default: break;
+            }
+        }
+    }
 
     switch (op) {
         case TokenType::Plus:
@@ -2051,6 +2238,7 @@ Value Interpreter::binaryOp(TokenType op, const Value& a, const Value& b) {
 }
 
 bool Interpreter::contains(const Value& container, const Value& item) {
+    if (const Value* method = structMethod(container, "contains")) return call(*method, {container, item}).truthy();
     switch (container.type()) {
         case Value::Type::String:
             if (!item.isString() && !item.isChar()) {
@@ -2071,6 +2259,7 @@ bool Interpreter::contains(const Value& container, const Value& item) {
 }
 
 Value Interpreter::indexGet(const Value& object, const Value& index) {
+    if (const Value* method = structMethod(object, "operator[]")) return call(*method, {object, index});
     switch (object.type()) {
         case Value::Type::List: {
             const auto& items = object.asList().items;
@@ -2094,8 +2283,9 @@ Value Interpreter::indexGet(const Value& object, const Value& index) {
 void Interpreter::indexSet(const Value& object, const Value& index, Value value) {
     switch (object.type()) {
         case Value::Type::List: {
-            auto& items = object.asList().items;
-            items[resolveIndex(index, items.size(), "list")] = std::move(value);
+            ListObj& list = object.asList();
+            size_t position = resolveIndex(index, list.items.size(), "list");
+            list.items[position] = checkListItem(list, std::move(value));
             return;
         }
         case Value::Type::Map:

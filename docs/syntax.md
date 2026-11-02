@@ -92,7 +92,9 @@ starts running.
 | `char` | one Unicode character: `'a'`, `'\n'`, `'é'` |
 | `string` | text: `"hello"` |
 | `list` | `[1, "two", 3.0]` |
+| `list<T>` | a list whose elements are all `T`: `list<string>`, `list<list<i32>>` |
 | `map` | `{name: "Ada", "a key": 1}` |
+| `map<K, V>` | a map with keys of type `K` and values of type `V`: `map<string, f64>` |
 | `func` | a function |
 | `any` | anything (the same as writing no type) |
 | `void` | only as a return type: the function returns nothing |
@@ -596,6 +598,84 @@ of their name. A function outside the struct that takes it as its first
 parameter can be called the same way: `f64 area(Rect r)` can be called as
 `r.area()`.
 
+### Inheritance
+
+A struct can extend another one, C++ style. It gets the other struct's
+fields (first) and methods, and can replace methods; `super.name()` calls the
+version it replaced.
+
+```
+struct Animal {
+    string name
+    string sound() { return "..." }
+    string speak() { return f"{this.name} says {this.sound()}" }
+}
+
+struct Dog : Animal {
+    string breed = "mutt"
+    string sound() { return "Woof" }
+    string speak() { return super.speak() + "!" }
+}
+
+d := Dog("Rex", breed: "beagle")
+d.speak()                  // "Rex says Woof!"
+Animal a = d               // a Dog is also an Animal
+is_a(d, Animal)            // true
+type(d)                    // "Dog"
+```
+
+The struct being extended must be declared first (or imported).
+
+### Operators and special methods
+
+Methods with these names make structs work with the language's operators and
+builtins:
+
+| Method | Used by |
+|--------|---------|
+| `operator+(other)`, `operator-`, `operator*`, `operator/`, `operator%`, `operator**` | `a + b` and the others (also `+=`, ...) |
+| `operator==(other)` | `==`, `!=`, `in`, `index_of`, `unique`, ... |
+| `operator<(other)` | `<`, `>`, `<=`, `>=`, `sort`, `min`, `max` |
+| `operator[](index)` | `value[index]` |
+| `to_string()` | `print`, `str`, f-strings, `+` with a string, and printing lists that contain it |
+| `iter()` | `for x in value` and comprehensions: return a list (or anything else you can loop over) |
+| `len()` | `len(value)` |
+| `contains(item)` | `item in value` |
+
+```
+struct Vec {
+    f64 x
+    f64 y
+    Vec operator+(Vec o) { return Vec(this.x + o.x, this.y + o.y) }
+    Vec operator*(f64 k) { return Vec(this.x * k, this.y * k) }
+    bool operator==(Vec o) { return this.x == o.x and this.y == o.y }
+    string to_string() { return f"({this.x}, {this.y})" }
+}
+
+print(Vec(1, 2) + Vec(3, 4) * 2)    // (7.0, 10.0)
+```
+
+## Typed lists and maps
+
+`list<T>` and `map<K, V>` are lists and maps whose elements have a type:
+
+```
+list<i32> scores = [90, 85]
+scores.push(77)               // fine
+scores.push("A+")             // error: this is a list<i32>, so it can't hold a string
+map<string, f64> prices = {tea: 2.5}
+prices["cake"] = 4            // stored as 4.0
+list<list<i32>> grid = [[1, 2], [3, 4]]
+f64 total(list<f64> values) { return sum(values) }
+```
+
+When a list or map is stored in a typed variable (or passed to a typed
+parameter), its elements are checked and converted, and the list remembers
+its element type: from then on `push`, `insert`, `extend` and element
+assignments are checked too, through any variable that refers to it. A list
+can't later be used as a different type (and `copy()` keeps the type); build
+a new list instead: `list<f64> as_floats = [f64(s) for s in scores]`.
+
 ## Enums
 
 ```
@@ -651,7 +731,18 @@ script.asc:2:9: runtime error: division by zero
    |         ^
 ```
 
-They can be caught with `try`/`catch`. The error variable holds the error
+When an error happens inside function calls, the message is followed by the
+calls it passed through, most recent first:
+
+```
+script.asc:2:17: runtime error: can't divide by zero
+ 2 |     if (b == 0) throw "can't divide by zero"
+   |                 ^
+  in divide(), called from script.asc:5:12
+  in average(), called from script.asc:9:7
+```
+
+Errors can be caught with `try`/`catch`. The error variable holds the error
 message (or the value given to `throw`). A `finally` block runs however the
 `try` ends: normally, with an error, or with `return`/`break`.
 
@@ -676,8 +767,8 @@ throw {code: 404, message: "not found"}   // any value can be thrown
 `assert(condition, message)` throws if the condition is falsy, and
 `exit(code)` ends the program immediately (it is not caught by `try`).
 
-Recursion that goes too deep (for example, a missing base case) is reported
-as a "stack overflow" error instead of crashing.
+Recursion can go 100,000 calls deep. Deeper than that (for example, with a
+missing base case) is reported as an error instead of crashing.
 
 ## Command line
 
@@ -686,6 +777,17 @@ ascend                       interactive REPL
 ascend file.asc [args...]    run a program; extra arguments are in the list `args`
 ascend -e 'print(1 + 2)'     run code from the command line
 ascend --check file.asc      report errors without running the program
+ascend test [folders...]     run every test file (named *_test.asc or test_*.asc)
+```
+
+`ascend test` runs each test file in a fresh interpreter. A file passes if it
+finishes without an error and with exit code 0, so `assert(...)` (or the
+`testing` package) is all a test needs:
+
+```
+// math_test.asc
+import geometry
+assert(geometry.circle_area(1) == PI, "area of a unit circle")
 ```
 
 Exit codes: `0` success, `65` syntax or type error found before running, `70`

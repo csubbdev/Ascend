@@ -118,6 +118,13 @@
         },
         { "name": "storage.type.function.ascend", "match": "\\bfunc\\b" },
         { "name": "storage.modifier.ascend", "match": "\\bconst\\b" },
+        {
+          "match": "\\b(operator)\\s*(\\+|-|\\*\\*|\\*|/|%|==|<|\\[\\])",
+          "captures": {
+            "1": { "name": "keyword.other.operator.ascend" },
+            "2": { "name": "entity.name.function.operator.ascend" }
+          }
+        },
         { "name": "keyword.operator.logical.ascend", "match": "\\b(and|or|not)\\b" }
       ]
     },
@@ -129,7 +136,7 @@
       "patterns": [
         { "name": "constant.language.ascend", "match": "\\b(true|false|null)\\b" },
         { "name": "support.constant.ascend", "match": "\\b(PI|E|INF|NAN|args)\\b" },
-        { "name": "variable.language.this.ascend", "match": "\\bthis\\b" }
+        { "name": "variable.language.this.ascend", "match": "\\b(this|super)\\b" }
       ]
     },
     "function-call": {

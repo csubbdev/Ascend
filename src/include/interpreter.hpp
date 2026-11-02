@@ -32,6 +32,15 @@ struct ExitRequest {
     int code;
 };
 
+// One function call that an uncaught error passed through: the function, and
+// where it was called from (line 0: by a builtin; line -1: by the runtime).
+struct TraceFrame {
+    std::string function;  // e.g. "divide()" or "Vec.length()"
+    const SourceFile* source;
+    int line;
+    int column;
+};
+
 // A tree-walking interpreter for Ascend programs.
 class Interpreter {
 public:
@@ -54,6 +63,10 @@ public:
     // map. Relative paths are relative to the file that is running.
     Value importModule(const std::string& path);
 
+    // The calls an uncaught error passed through, innermost first. Reset by
+    // each execute() and whenever an error is caught.
+    const std::vector<TraceFrame>& traceback() const { return trace_; }
+
     // Calls the program's main() function, C style: with no arguments, with
     // the list `args`, or with (count, args), depending on its parameters.
     // Returns its result as an exit code (0 unless it returns an integer).
@@ -68,6 +81,9 @@ public:
     Value indexGet(const Value& object, const Value& index);
     Value slice(const Value& object, const Value& start, const Value& end);
     bool contains(const Value& container, const Value& item);
+
+    // A struct's iter() result for loops (other values are returned as they are).
+    Value iterable(const Value& value);
 
     // Allocation of objects the cycle collector should know about.
     std::shared_ptr<Environment> newEnvironment(std::shared_ptr<Environment> parent);
@@ -98,6 +114,18 @@ public:
     size_t trackedObjectCount() const { return heap_.size(); }
 
 private:
+    // Calls struct methods for printing and comparing (see ValueHooks).
+    class Hooks final : public ValueHooks {
+    public:
+        explicit Hooks(Interpreter& interpreter) : interpreter_(interpreter) {}
+        bool customString(const Value& value, std::string& out) override;
+        bool customEqual(const Value& a, const Value& b, bool& out) override;
+        bool customCompare(const Value& a, const Value& b, int& out) override;
+
+    private:
+        Interpreter& interpreter_;
+    };
+
     enum class Flow { Normal, Break, Continue, Return };
     using EnvPtr = std::shared_ptr<Environment>;
     class FrameGuard;
@@ -173,9 +201,13 @@ private:
     int errorColumn_ = 0;
     const SourceFile* errorSource_ = nullptr;
     bool replMode_ = false;
+    bool runningMain_ = false;
     int callDepth_ = 0;
     int maxCallDepth_;
     StackLimit stack_;
+    std::vector<TraceFrame> trace_;
+    Hooks hooks_{*this};
+    ValueHooks* previousHooks_ = nullptr;
 
     std::vector<std::weak_ptr<GcObject>> heap_;
     size_t nextCollection_;

@@ -2,6 +2,7 @@
 
 #include "interpreter.hpp"
 #include "numeric.hpp"
+#include "typecheck.hpp"
 #include "utf8.hpp"
 
 #include <algorithm>
@@ -470,8 +471,23 @@ void registerCore(Interpreter& interp) {
     interp.defineNative("repr", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(toRepr(args[0])); });
     interp.defineNative("bool", 1, 1, [](Interpreter&, Args& args) { return Value::fromBool(args[0].truthy()); });
 
-    interp.defineNative("len", 1, 1, [](Interpreter&, Args& args) {
+    interp.defineNative("is_a", 2, 2, [](Interpreter&, Args& args) {
+        // is_a(value, Point) or is_a(value, "Point"): true for the struct and the structs it extends.
+        std::string type;
+        if (args[1].isString()) {
+            type = args[1].asString();
+        } else if (args[1].isFunction() && args[1].asFunction().kind == Callable::Kind::Struct) {
+            type = static_cast<const StructType&>(args[1].asFunction()).info->name;
+        } else {
+            typeError("is_a", 1, "a struct or a type name", args[1]);
+        }
+        const StructInfo* info = args[0].isMap() ? args[0].asMap().structInfo() : nullptr;
+        return Value::fromBool(info != nullptr ? info->isA(type) : typeNameOf(args[0]) == type);
+    });
+
+    interp.defineNative("len", 1, 1, [](Interpreter& in, Args& args) {
         const Value& value = args[0];
+        if (const Value* method = structMethod(value, "len")) return in.call(*method, {value});
         switch (value.type()) {
             case Value::Type::String: return Value::fromInt(static_cast<int64_t>(utf8Length(value.asString())));
             case Value::Type::List: return Value::fromInt(static_cast<int64_t>(value.asList().items.size()));
@@ -584,8 +600,10 @@ void registerConversions(Interpreter& interp) {
 
 void registerCollections(Interpreter& interp) {
     interp.defineNative("push", 2, -1, [](Interpreter&, Args& args) {
-        auto& items = listArg(args, 0, "push").items;
-        for (size_t i = 1; i < args.size(); ++i) items.push_back(args[i]);
+        ListObj& list = listArg(args, 0, "push");
+        std::vector<Value> added;
+        for (size_t i = 1; i < args.size(); ++i) added.push_back(checkListItem(list, args[i]));
+        list.items.insert(list.items.end(), added.begin(), added.end());
         return Value();
     });
 
@@ -606,7 +624,7 @@ void registerCollections(Interpreter& interp) {
         if (index < 0 || index > size) {
             throw RuntimeError("insert() index " + toString(args[1]) + " is out of range (length " + std::to_string(size) + ")");
         }
-        items.insert(items.begin() + index, args[2]);
+        items.insert(items.begin() + index, checkListItem(args[0].asList(), args[2]));
         return Value();
     });
 
@@ -627,8 +645,10 @@ void registerCollections(Interpreter& interp) {
     });
 
     interp.defineNative("extend", 2, 2, [](Interpreter&, Args& args) {
-        auto& items = listArg(args, 0, "extend").items;
+        ListObj& list = listArg(args, 0, "extend");
+        auto& items = list.items;
         std::vector<Value> more = listArg(args, 1, "extend").items;  // copy: extending a list with itself is fine
+        for (auto& item : more) item = checkListItem(list, std::move(item));
         items.insert(items.end(), more.begin(), more.end());
         return Value();
     });
@@ -877,11 +897,17 @@ void registerCollections(Interpreter& interp) {
     });
 
     interp.defineNative("copy", 1, 1, [](Interpreter& in, Args& args) {
-        if (args[0].isList()) return Value::fromList(in.newList(args[0].asList().items));
+        if (args[0].isList()) {
+            auto copy = in.newList(args[0].asList().items);
+            copy->elementType = args[0].asList().elementType;
+            return Value::fromList(copy);
+        }
         if (args[0].isMap()) {
             auto copy = in.newMap();
             for (const auto& entry : args[0].asMap().entries) copy->set(entry.first, entry.second);
             copy->structType = args[0].asMap().structType;  // a copy of a struct is the same kind of struct
+            copy->keyType = args[0].asMap().keyType;
+            copy->valueType = args[0].asMap().valueType;
             return Value::fromMap(copy);
         }
         return args[0];
@@ -1503,6 +1529,7 @@ void registerStandardLibrary(Interpreter& interpreter) {
     registerSystem(interpreter);
     registerFiles(interpreter);
     registerRegex(interpreter);
+    registerExtraLibrary(interpreter);
 }
 
 }  // namespace ascend

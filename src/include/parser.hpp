@@ -49,6 +49,7 @@ private:
     StmtPtr fromImportStatement(const Token& keyword);
     std::string modulePath(std::string& lastPart);
     StmtPtr structDeclaration(const Token& keyword);
+    size_t operatorName(size_t offset, std::string& name) const;
     StmtPtr enumDeclaration(const Token& keyword);
     StmtPtr returnStatement(const Token& keyword);
     StmtPtr tryStatement(const Token& keyword);

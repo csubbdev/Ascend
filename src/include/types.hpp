@@ -2,6 +2,7 @@
 #define ASCEND_TYPES_HPP
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace ascend {
@@ -33,10 +34,17 @@ struct TypeSpec {
     NumKind num = NumKind::Int;  // used when kind == Number
     bool nullable = false;
     std::string structName;      // used when kind == Struct
+    // list<T>: element is T.  map<K, V>: key is K and element is V. Null for
+    // plain `list` and `map`, which hold anything.
+    std::shared_ptr<const TypeSpec> element;
+    std::shared_ptr<const TypeSpec> key;
 
     bool isAny() const { return kind == TypeKind::Any; }
     std::string name() const;
 };
+
+// Whether two types are the same, including their element types.
+bool sameType(const TypeSpec& a, const TypeSpec& b);
 
 // Looks up a builtin type name such as "i32", "byte" or "string". Returns
 // false for other names (which may be struct types).

@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.0.0
+
+### New
+
+- **Inheritance**: `struct Dog : Animal { ... }` gets Animal's fields and
+  methods; methods can be replaced and call the replaced version with
+  `super.name()`. A Dog can be used wherever an Animal is expected, and
+  `is_a(value, Animal)` checks it.
+- **Operator overloading** with methods named `operator+`, `operator-`,
+  `operator*`, `operator/`, `operator%`, `operator**`, `operator==`,
+  `operator<` (which also gives `>`, `<=`, `>=`, `sort`, `min` and `max`) and
+  `operator[]`.
+- **Special methods**: `to_string()` (used by `print`, `str`, f-strings and
+  string concatenation), `iter()` (for loops and comprehensions), `len()` and
+  `contains()` (`in`).
+- **Typed lists and maps**: `list<i32>`, `map<string, f64>`,
+  `list<list<string>>`. Elements are checked and converted, and the list or
+  map keeps checking what's added to it later.
+- **Tracebacks**: uncaught errors list the calls they passed through.
+- **Deep recursion**: programs run on a thread with a large stack, so
+  recursion can go 100,000 calls deep (it was about 2,000).
+- **`ascend test`** runs every `*_test.asc` / `test_*.asc` file and reports
+  which passed.
+- **Running programs**: `run(["git", "status"])` and `run("ls | wc -l")`
+  capture the output and exit code.
+- **HTTP**: `http_get`, `http_post` and `http_request` (using curl).
+- **Files and folders**: `walk_dir`, `remove_dir`, `copy_file`, `move_file`,
+  `file_size`, `path_join`, `basename`, `dirname`, `extension`, `abs_path`,
+  `cwd`, `chdir`, `temp_dir`.
+- **Data**: `csv_parse`, `csv_stringify`, `base64_encode`, `base64_decode`,
+  `sha256`, `uuid`.
+- **More builtins**: `now`, `format_time`, `set_env`, `platform`,
+  `capitalize`, `title`, `trim_start`, `trim_end`, `last_index_of`, `lcm`,
+  `factorial`, `trunc`, `degrees`, `radians`, `union`, `intersect`,
+  `difference`, `is_a`.
+
+### Changed
+
+- Comparing values that can't be compared says what they are: "can't compare
+  a string with an int".
+
 ## 0.6.0
 
 ### New

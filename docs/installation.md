@@ -5,9 +5,10 @@
 - A C++17 compiler: GCC 8+, Clang 7+ or Visual Studio 2019+
 - CMake 3.10 or newer
 
-Ascend has no other dependencies. The package manager, `apkg`, uses
-[git](https://git-scm.com) to download packages, so install git too if you
-want to use packages from the internet.
+Ascend has no other dependencies. A few things use programs you probably
+have already: the package manager, `apkg`, uses [git](https://git-scm.com) to
+download packages, and `http_get` and the other HTTP functions use
+[curl](https://curl.se) (included with macOS and Windows 10 and later).
 
 ## Build
 
@@ -27,6 +28,7 @@ Visual Studio). Builds default to the optimized `Release` configuration.
 ./build/ascend                          # start the interactive REPL
 ./build/ascend -e 'print(2 ** 10)'      # run a one-liner
 ./build/ascend --check my_program.asc   # find errors without running
+./build/ascend test                     # run the *_test.asc files in this folder
 ```
 
 To run `ascend` and `apkg` from anywhere, copy them from `build/` into a

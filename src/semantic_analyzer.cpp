@@ -1,6 +1,7 @@
 #include "semantic_analyzer.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <unordered_set>
 
 namespace ascend {
@@ -39,6 +40,8 @@ std::vector<Diagnostic> SemanticAnalyzer::analyze(const Program& program) {
 
 void SemanticAnalyzer::noteType(const TypeSpec& type, int line, int column) {
     if (type.kind == TypeKind::Struct) typeUses_.push_back({type.structName, line, column});
+    if (type.element) noteType(*type.element, line, column);
+    if (type.key) noteType(*type.key, line, column);
 }
 
 void SemanticAnalyzer::checkType(const Expr* expr, const TypeSpec& type,
@@ -55,8 +58,37 @@ void SemanticAnalyzer::checkType(const Expr* expr, const TypeSpec& type,
             }
             return;
         }
-        case ExprKind::List: value = Value::fromList(std::make_shared<ListObj>()); break;
-        case ExprKind::Map: value = Value::fromMap(std::make_shared<MapObj>()); break;
+        case ExprKind::List:
+            // list<u8> xs = [1, 300]: check each element that's known now.
+            if (type.kind == TypeKind::List && type.element) {
+                for (const auto& element : expr->as<ListExpr>().elements) {
+                    if (element->kind == ExprKind::Spread) continue;
+                    checkType(element.get(), *type.element, [&](const CoerceFailure& inner) {
+                        CoerceFailure outer;
+                        outer.what = "a list containing " + inner.what;
+                        outer.hint = inner.hint;
+                        return describe(outer);
+                    });
+                }
+                return;
+            }
+            value = Value::fromList(std::make_shared<ListObj>());
+            break;
+        case ExprKind::Map:
+            if (type.kind == TypeKind::Map && type.element) {
+                for (const auto& entry : expr->as<MapExpr>().entries) {
+                    if (!entry.second) continue;
+                    checkType(entry.second.get(), *type.element, [&](const CoerceFailure& inner) {
+                        CoerceFailure outer;
+                        outer.what = "a map containing " + inner.what;
+                        outer.hint = inner.hint;
+                        return describe(outer);
+                    });
+                }
+                return;
+            }
+            value = Value::fromMap(std::make_shared<MapObj>());
+            break;
         case ExprKind::FString: value = Value::fromString(""); break;
         case ExprKind::Function: {
             if (type.kind == TypeKind::Function) return;
@@ -169,6 +201,7 @@ void SemanticAnalyzer::visitStmt(const Stmt& stmt) {
         case StmtKind::Struct: {
             const auto& declaration = stmt.as<StructStmt>();
             declared_.insert(declaration.name);
+            if (!declaration.parent.empty()) typeUses_.push_back({declaration.parent, stmt.line, stmt.column});
             std::set<std::string> seen;
             for (const auto& field : declaration.fields) {
                 if (!seen.insert(field.name).second) {
@@ -193,6 +226,16 @@ void SemanticAnalyzer::visitStmt(const Stmt& stmt) {
                 if (!seen.insert(method.first).second) {
                     report(function.line, function.column,
                            "struct " + declaration.name + " already has a field or method named '" + method.first + "'");
+                }
+                bool isOperator = method.first.size() > 8 && method.first.compare(0, 8, "operator") == 0 &&
+                                  !std::isalnum(static_cast<unsigned char>(method.first[8])) && method.first[8] != '_';
+                if (isOperator && function.params.size() != 2) {
+                    report(function.line, function.column,
+                           method.first + " takes one parameter: the value on the other side (or the index, for [])");
+                }
+                if ((method.first == "to_string" || method.first == "iter" || method.first == "len") &&
+                    function.params.size() != 1) {
+                    report(function.line, function.column, method.first + "() is called with no arguments, so it can't have parameters");
                 }
                 if (method.first == "init" && function.params.size() > 1) {
                     report(function.line, function.column,

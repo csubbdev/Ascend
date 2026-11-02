@@ -10,6 +10,44 @@
 
 namespace ascend {
 
+std::string formatTraceback(const std::vector<TraceFrame>& frames, const std::string& mainFile) {
+    if (frames.empty()) return "";
+    auto describe = [&](const TraceFrame& frame) {
+        std::string text = "  in " + frame.function;
+        if (frame.line > 0) {
+            text += ", called from " + (frame.source != nullptr ? frame.source->name : mainFile) + ":" +
+                    std::to_string(frame.line) + ":" + std::to_string(frame.column);
+        } else if (frame.line == 0) {
+            text += ", called by a builtin";
+        }
+        return text + "\n";
+    };
+    // Repeated calls (deep recursion) are shown once with a count, and very
+    // long tracebacks keep their start and end.
+    std::vector<std::pair<std::string, size_t>> lines;
+    for (const auto& frame : frames) {
+        std::string line = describe(frame);
+        if (!lines.empty() && lines.back().first == line) {
+            ++lines.back().second;
+        } else {
+            lines.emplace_back(line, 1);
+        }
+    }
+    std::string out;
+    const size_t head = 15;
+    const size_t tail = 5;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines.size() > head + tail && i == head) {
+            out += "  ... " + std::to_string(lines.size() - head - tail) + " more ...\n";
+            i = lines.size() - tail - 1;
+            continue;
+        }
+        out += lines[i].first;
+        if (lines[i].second > 1) out += "    (and " + std::to_string(lines[i].second - 1) + " more times)\n";
+    }
+    return out;
+}
+
 void prepareSource(std::string& text) {
     if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);  // UTF-8 byte order mark
     if (text.compare(0, 2, "#!") == 0) text.replace(0, 2, "//");     // allow #!/usr/bin/env ascend
@@ -24,7 +62,8 @@ RunResult runSource(Interpreter& interpreter, const std::string& source, const R
         }
         err.flush();
     };
-    // Runtime errors may come from an imported file.
+    // Runtime errors may come from an imported file. After the message come
+    // the calls the error passed through, innermost first.
     auto reportAt = [&](const SourceFile* file, int line, int column, const std::string& message) {
         interpreter.out().flush();
         if (file != nullptr) {
@@ -32,6 +71,7 @@ RunResult runSource(Interpreter& interpreter, const std::string& source, const R
         } else {
             err << formatDiagnostic(source, options.filename, line, column, "runtime error", message);
         }
+        err << formatTraceback(interpreter.traceback(), options.filename);
         err.flush();
     };
 

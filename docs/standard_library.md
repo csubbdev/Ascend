@@ -42,6 +42,7 @@ Each type name converts a value to that type, and fails if it doesn't fit.
 | `repr(x)` | `x` as source-like text (strings and chars are quoted and escaped). |
 | `bool(x)` | `true` if `x` is truthy. |
 | `hex(n)`, `bin(n)` | An integer in hex or binary: `hex(255)` is `"0xff"`. |
+| `is_a(x, type)` | `true` if `x` is a value of the struct `type` (or of a struct that extends it), or if `type` is a type name string matching `type(x)`: `is_a(d, Animal)`, `is_a(5, "int")`. |
 
 ## Lists
 
@@ -105,6 +106,10 @@ Lengths and positions count characters, not bytes.
 | `join(list, separator?)` | See Lists. |
 | `upper(s)`, `lower(s)` | Upper/lower case (ASCII letters). Also work on a char. |
 | `trim(s)` | Removes leading and trailing whitespace. |
+| `trim_start(s)`, `trim_end(s)` | Removes whitespace from one end only. |
+| `capitalize(s)` | Upper-cases the first letter: `"hello world"` → `"Hello world"`. |
+| `title(s)` | Upper-cases the first letter of every word: `"hello world"` → `"Hello World"`. |
+| `last_index_of(s, part)` | Position of the last occurrence of `part` in a string (or of a value in a list), or `-1`. |
 | `replace(s, old, new)` | Replaces every occurrence of `old`. |
 | `starts_with(s, prefix)`, `ends_with(s, suffix)` | Prefix/suffix tests. |
 | `contains(s, part)` | `true` if `part` occurs in `s` (same as `part in s`). |
@@ -129,7 +134,11 @@ Lengths and positions count characters, not bytes.
 | `sum(list)` | Sum of a list of numbers. Small integer types are widened, so the sum of `u8` values is an `int`. |
 | `mean(list)`, `median(list)` | The average / middle value of a list of numbers, as a float. |
 | `sign(x)` | `-1`, `0` or `1`. |
-| `gcd(a, b)` | Greatest common divisor. |
+| `gcd(a, b)`, `lcm(a, b)` | Greatest common divisor and least common multiple. |
+| `factorial(n)` | `n!` for `n` from 0 to 20. |
+| `trunc(x)` | Drops the fraction, giving an int (toward zero: `trunc(-3.7)` is `-3`). |
+| `degrees(x)`, `radians(x)` | Converts radians to degrees and back. |
+| `union(a, b)`, `intersect(a, b)`, `difference(a, b)` | Set operations on lists: the results have no duplicates and keep the order of `a`. |
 | `sqrt(x)`, `cbrt(x)` | Square and cube root. |
 | `pow(a, b)` | Same as `a ** b`. |
 | `exp(x)`, `log(x, base?)`, `log2(x)`, `log10(x)` | Exponential and logarithms (`log` is natural without a base). |
@@ -158,6 +167,17 @@ Lengths and positions count characters, not bytes.
 | `is_dir(path)` | `true` if `path` is a folder. |
 | `make_dir(path)` | Creates a folder (and the folders above it if needed). Returns `true` if it was created, `false` if it already existed. |
 | `list_dir(path?)` | The names of the files and folders in a folder (default: the current one), sorted. |
+| `walk_dir(path?)` | Every file below a folder (default: the current one), as sorted paths relative to it. |
+| `remove_dir(path)` | Deletes a folder and everything in it. Returns `false` if there was no such folder. |
+| `copy_file(from, to)`, `move_file(from, to)` | Copies or moves (renames) a file, replacing `to` if it exists. |
+| `file_size(path)` | The size of a file in bytes. |
+| `path_join(parts...)` | Joins path parts with `/`: `path_join("data", "2024", "log.txt")`. |
+| `basename(path)`, `dirname(path)`, `extension(path)` | The last part of a path, everything before it, and its extension (`".txt"`). |
+| `abs_path(path)` | The full path. |
+| `cwd()`, `chdir(path)` | The current folder, and changing it. |
+| `temp_dir()` | The folder for temporary files. |
+| `csv_parse(text, separator?)` | Parses CSV into a list of rows, each a list of strings. Handles quoted fields with commas, quotes (`""`) and newlines. |
+| `csv_stringify(rows, separator?)` | The opposite: rows (lists of values) as CSV text, quoting fields where needed. |
 | `json_parse(text)` | Converts JSON to Ascend values (objects become maps, arrays become lists). |
 | `json_stringify(value, indent?)` | Converts a value to JSON; with `indent`, pretty-prints with that many spaces. |
 
@@ -184,13 +204,43 @@ written, so they're the easiest way to write patterns: `r"\d+"` (the same as
 | `exit(code?)` | Ends the program with exit code `code` (default 0). |
 | `args` | List of the extra command line arguments given after the script name. |
 
+## Running programs and HTTP
+
+| Function | Description |
+|----------|-------------|
+| `run(command, input?)` | Runs a program and waits for it. `command` is a list (`["git", "status"]`, run directly) or a string (run by the system shell, so pipes work: `"ls | wc -l"`). `input` is sent to its standard input. Returns `{code, stdout, stderr, ok}`, where `ok` is `code == 0`. |
+| `system(command)` | Runs a shell command with its output going straight to the terminal; returns the exit code. |
+| `http_get(url, headers?)` | Downloads a URL. Returns `{status, ok, body}` (`ok` for statuses 200-299). `headers` is a map: `{"Authorization": "Bearer ..."}`. |
+| `http_post(url, body, headers?)` | Sends `body`: a string as is, or a map or list as JSON (with a JSON content type). Returns the same as `http_get`. |
+| `http_request(method, url, body?, headers?)` | Any other method: `http_request("DELETE", url)`. |
+
+The HTTP functions use the `curl` program (installed on macOS, Windows 10
+and later, and most Linux systems). A connection problem is an error; an
+HTTP error status like 404 isn't, so check `ok` or `status`.
+
+```
+response := http_get("https://api.github.com/repos/csubbdev/Ascend")
+if (response.ok) print(json_parse(response.body).description)
+```
+
+## Encodings and ids
+
+| Function | Description |
+|----------|-------------|
+| `base64_encode(text)`, `base64_decode(text)` | Base64. |
+| `sha256(text)` | The SHA-256 hash, as 64 hex digits. |
+| `uuid()` | A random UUID, like `"3f2a8c1e-5b7d-4e9a-8c1f-2d6b9e0a4c3b"`. |
+
 ## Time and system
 
 | Function | Description |
 |----------|-------------|
+| `now()` | The local date and time as a map: `year`, `month`, `day`, `hour`, `minute`, `second`, `weekday` (0 is Sunday), `yearday` and `timestamp`. |
+| `format_time(seconds, format?)` | A timestamp (like `time()`) as local time, formatted with `strftime` codes (default `"%Y-%m-%d %H:%M:%S"`). |
 | `time()` | Seconds since 1970-01-01 as a float. |
 | `clock()` | Seconds from a steady clock; subtract two readings to time code. |
 | `sleep(seconds)` | Pauses the program. |
 | `date(format?)` | The local date and time, formatted with `strftime` codes (default `"%Y-%m-%d %H:%M:%S"`). |
 | `env(name)` | The value of an environment variable, or `null`. |
-| `system(command)` | Runs a shell command and returns its exit code. |
+| `set_env(name, value)` | Sets an environment variable (for this program and the programs it runs). |
+| `platform()` | `"linux"`, `"macos"` or `"windows"`. |

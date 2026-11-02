@@ -387,6 +387,7 @@ struct StructField {
 struct StructStmt final : Stmt {
     StructStmt(int line, int column) : Stmt(StmtKind::Struct, line, column) {}
     std::string name;
+    std::string parent;  // struct Dog : Animal { ... }
     std::vector<StructField> fields;
     // name -> method. Methods get the value they're called on as their first
     // parameter, `this`.

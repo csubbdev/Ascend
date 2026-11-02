@@ -69,6 +69,13 @@ void write(std::string& out, const Value& value, bool repr, std::vector<const vo
                 out += "{...}";
                 return;
             }
+            if (map->structType && activeValueHooks() != nullptr) {
+                std::string custom;  // a to_string() method
+                if (activeValueHooks()->customString(value, custom)) {
+                    out += custom;
+                    return;
+                }
+            }
             checkNesting(static_cast<int>(active.size()));
             active.push_back(map);
             if (map->structInfo()) out += map->structInfo()->name;  // Point{x: 1, y: 2}
@@ -136,6 +143,10 @@ bool equalAt(const Value& a, const Value& b, int depth) {
             checkNesting(depth);
             const MapObj& x = a.asMap();
             const MapObj& y = b.asMap();
+            bool custom = false;  // an operator== method
+            if (x.structType && activeValueHooks() != nullptr && activeValueHooks()->customEqual(a, b, custom)) {
+                return custom;
+            }
             if (x.size() != y.size()) return false;
             if ((x.structInfo() ? x.structInfo()->name : "") != (y.structInfo() ? y.structInfo()->name : "")) return false;
             for (const auto& entry : x.entries) {
@@ -167,7 +178,13 @@ int compareAt(const Value& a, const Value& b, int depth) {
         }
         return x.size() < y.size() ? -1 : (x.size() > y.size() ? 1 : 0);
     }
-    throw RuntimeError(std::string("can't compare ") + a.typeName() + " with " + b.typeName());
+    int custom = 0;  // an operator< method
+    if (a.isMap() && a.asMap().structType && activeValueHooks() != nullptr &&
+        activeValueHooks()->customCompare(a, b, custom)) {
+        return custom;
+    }
+    throw RuntimeError("can't compare " + aTypeName(a) + " with " + aTypeName(b) +
+                       (a.isMap() && a.asMap().structType ? " (give the struct an operator< method to sort it)" : ""));
 }
 
 void appendEscaped(std::string& out, char c, char quote) {
@@ -399,8 +416,19 @@ void FunctionObj::forEachChild(const std::function<void(GcObject*)>& visit) cons
     if (closure) visit(closure.get());
 }
 
+ValueHooks*& activeValueHooks() {
+    static thread_local ValueHooks* hooks = nullptr;
+    return hooks;
+}
+
+const Value* structMethod(const Value& value, const std::string& name) {
+    if (!value.isMap() || !value.asMap().structType) return nullptr;
+    return value.asMap().structType->method(name);
+}
+
 void StructType::forEachChild(const std::function<void(GcObject*)>& visit) const {
     if (closure) visit(closure.get());
+    if (parent) visit(parent.get());
     for (const auto& entry : methods) {
         if (GcObject* child = entry.second.gcObject()) visit(child);
     }
