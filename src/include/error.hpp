@@ -6,6 +6,12 @@
 
 namespace ascend {
 
+// A program's source code, kept for error messages.
+struct SourceFile {
+    std::string name;  // shown in error messages, e.g. "script.asc" or "<repl>"
+    std::string text;
+};
+
 // A problem found before the program runs (while lexing, parsing or analyzing).
 struct Diagnostic {
     int line = 0;
@@ -26,6 +32,7 @@ public:
 
     int line;
     int column;
+    const SourceFile* source = nullptr;  // the file the location refers to
 };
 
 // Formats an error the way the command line tools print it:

@@ -1,0 +1,31 @@
+{
+  "name": "ascend-language",
+  "displayName": "Ascend",
+  "description": "Syntax highlighting for the Ascend programming language",
+  "version": "0.3.0",
+  "publisher": "ascend",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "ascend",
+        "aliases": ["Ascend", "ascend"],
+        "extensions": [".asc"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ascend",
+        "scopeName": "source.ascend",
+        "path": "./syntaxes/ascend.tmLanguage.json"
+      }
+    ]
+  }
+}

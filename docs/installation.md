@@ -23,6 +23,7 @@ with Visual Studio). Builds default to the optimized `Release` configuration.
 ./build/ascend examples/fizzbuzz.asc   # run a program
 ./build/ascend                          # start the interactive REPL
 ./build/ascend -e 'print(2 ** 10)'      # run a one-liner
+./build/ascend --check my_program.asc   # find errors without running
 ```
 
 To run `ascend` from anywhere, copy `build/ascend` into a directory on your
@@ -46,3 +47,9 @@ filter them by name:
 ```
 
 To skip building the tests, configure with `-DASCEND_BUILD_TESTS=OFF`.
+
+## Editor support
+
+`editors/vscode` is a Visual Studio Code extension with syntax highlighting,
+bracket matching and comment toggling for `.asc` files. See its
+[README](../editors/vscode/README.md) to install it.

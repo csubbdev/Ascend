@@ -16,6 +16,7 @@ void printUsage(std::ostream& out) {
            "  ascend                       start the interactive REPL\n"
            "  ascend <file.asc> [args...]  run a program\n"
            "  ascend -e <code> [args...]   run code given on the command line\n"
+           "  ascend --check <file.asc>    check a program for errors without running it\n"
            "  ascend -h | --help           show this help\n"
            "  ascend -v | --version        show the version\n"
            "\n"
@@ -26,8 +27,7 @@ bool readFile(const std::string& path, std::string& contents) {
     std::ifstream file(path, std::ios::binary);
     if (!file) return false;
     contents.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    if (contents.compare(0, 3, "\xEF\xBB\xBF") == 0) contents.erase(0, 3);  // UTF-8 byte order mark
-    if (contents.compare(0, 2, "#!") == 0) contents.replace(0, 2, "//");     // allow #!/usr/bin/env ascend
+    ascend::prepareSource(contents);
     return true;
 }
 
@@ -55,6 +55,23 @@ int main(int argc, char* argv[]) {
     std::string source;
     ascend::RunOptions options;
     size_t scriptArgsStart;
+    if (first == "--check") {
+        if (args.size() != 2) {
+            std::cerr << "error: --check needs exactly one file\n\n";
+            printUsage(std::cerr);
+            return 1;
+        }
+        if (!readFile(args[1], source)) {
+            std::cerr << "error: can't open file '" << args[1] << "'\n";
+            return 1;
+        }
+        options.filename = args[1];
+        options.checkOnly = true;
+        ascend::Interpreter interpreter;
+        ascend::RunResult result = ascend::runSource(interpreter, source, options, std::cerr);
+        if (result.status == ascend::RunStatus::Ok) std::cout << args[1] << ": no errors found\n";
+        return result.exitCode;
+    }
     if (first == "-e" || first == "--eval") {
         if (args.size() < 2) {
             std::cerr << "error: " << first << " needs some code to run\n\n";

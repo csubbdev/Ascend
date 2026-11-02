@@ -44,6 +44,12 @@ std::string op(TokenType type) {
         case TokenType::And: return "and";
         case TokenType::Or: return "or";
         case TokenType::Not: return "not";
+        case TokenType::Tilde: return "~";
+        case TokenType::Ampersand: return "&";
+        case TokenType::Pipe: return "|";
+        case TokenType::Caret: return "^";
+        case TokenType::ShiftLeft: return "<<";
+        case TokenType::ShiftRight: return ">>";
         default: return "?";
     }
 }
@@ -106,7 +112,19 @@ std::string dump(const Expr* expr) {
         case ExprKind::Function: {
             const auto& function = expr->as<FunctionExpr>();
             std::string out = "(func";
-            for (const auto& param : function.params) out += " " + param.name;
+            for (const auto& param : function.params) {
+                out += " " + param.name;
+                if (!param.type.isAny()) out += ":" + param.type.name();
+            }
+            if (!function.returnType.isAny()) out += " -> " + function.returnType.name();
+            return out + ")";
+        }
+        case ExprKind::FString: {
+            std::string out = "(f";
+            for (const auto& part : expr->as<FStringExpr>().parts) {
+                out += " " + (part.expr ? dump(part.expr.get()) + (part.spec.empty() ? "" : ":" + part.spec)
+                                        : toRepr(Value::fromString(part.text)));
+            }
             return out + ")";
         }
     }
@@ -142,7 +160,8 @@ TEST(parser_arithmetic_precedence) {
 TEST(parser_power_and_unary_minus) {
     CHECK_EQ(expr("-2 ** 2"), std::string("(- (** 2 2))"));
     CHECK_EQ(expr("2 ** 3 ** 2"), std::string("(** 2 (** 3 2))"));
-    CHECK_EQ(expr("2 ** -1"), std::string("(** 2 (- 1))"));
+    CHECK_EQ(expr("2 ** -1"), std::string("(** 2 -1)"));  // a minus before a number is part of the literal
+    CHECK_EQ(expr("-x ** 2"), std::string("(- (** x 2))"));
 }
 
 TEST(parser_logic_and_comparison) {
@@ -287,4 +306,71 @@ TEST(parser_survives_deep_nesting) {
     deep += "1";
     deep += std::string(5000, ')');
     CHECK_EQ(firstError(deep), std::string("code is nested too deeply"));
+}
+
+TEST(parser_bitwise_precedence) {
+    CHECK_EQ(expr("a & 1 == 0"), std::string("(== (& a 1) 0)"));  // unlike C, & binds tighter than ==
+    CHECK_EQ(expr("1 << 2 + 3"), std::string("(<< 1 (+ 2 3))"));
+    CHECK_EQ(expr("a | b ^ c & d"), std::string("(| a (^ b (& c d)))"));
+    CHECK_EQ(expr("~x & 0xFF"), std::string("(& (~ x) 255)"));
+}
+
+TEST(parser_typed_declarations) {
+    Parsed typed = parse("age: u8 = 30");
+    CHECK(typed.errors.empty());
+    const auto& decl = onlyStatement(typed).as<DeclareStmt>();
+    CHECK(decl.hasType);
+    CHECK(decl.type.kind == TypeKind::Number);
+    CHECK(decl.type.num == NumKind::U8);
+    CHECK(decl.value != nullptr);
+
+    Parsed zero = parse("name: string?");
+    CHECK(zero.errors.empty());
+    const auto& noValue = onlyStatement(zero).as<DeclareStmt>();
+    CHECK(noValue.type.nullable);
+    CHECK(noValue.value == nullptr);
+
+    Parsed constant = parse("const MAX: i64 = 10");
+    CHECK(constant.errors.empty());
+    CHECK(onlyStatement(constant).as<DeclareStmt>().constant);
+    CHECK(parse("const LIMIT := 3").errors.empty());
+
+    CHECK(firstError("x: int32 = 1").find("unknown type 'int32'") == 0);
+    CHECK_EQ(firstError("x: void"), std::string("'void' can only be used as a return type"));
+    CHECK_EQ(firstError("x: i32 := 5"), std::string("use '=' after a type, like 'x: i32 = ...'"));
+    CHECK_EQ(firstError("const X"), std::string("a constant needs a value: 'const X = ...'"));
+}
+
+TEST(parser_typed_functions) {
+    CHECK_EQ(expr("func(a: i32, b: string? = null) -> f64 { return 1.0 }"), std::string("(func a:i32 b:string? -> f64)"));
+    CHECK_EQ(expr("func() -> void { }"), std::string("(func -> void)"));
+}
+
+TEST(parser_number_literal_ranges) {
+    CHECK_EQ(expr("-128i8"), std::string("-128"));
+    CHECK_EQ(expr("-9223372036854775808"), std::string("-9223372036854775808"));
+    CHECK_EQ(expr("18446744073709551615u64"), std::string("18446744073709551615"));
+    CHECK_EQ(firstError("300u8"), std::string("300u8 doesn't fit in u8 (0 to 255)"));
+    CHECK_EQ(firstError("-1u8"), std::string("-1u8 is negative, but u8 is unsigned"));
+    CHECK(firstError("9223372036854775808").find("9223372036854775808 is too large for int") == 0);
+}
+
+TEST(parser_match) {
+    Parsed parsed = parse("match x {\n  1, 2 => print(1)\n  3 => {\n    y := 2\n  }\n  else => print(0)\n}");
+    CHECK(parsed.errors.empty());
+    const auto& match = onlyStatement(parsed).as<MatchStmt>();
+    CHECK_EQ(match.arms.size(), size_t(3));
+    CHECK_EQ(match.arms[0].patterns.size(), size_t(2));
+    CHECK(match.arms[1].body.declaresNames);
+    CHECK(match.arms[2].patterns.empty());
+    CHECK(parse("match x { _ => print(0) }").errors.empty());
+    CHECK_EQ(firstError("match x {\n else => 1\n _ => 2\n}"), std::string("a match can only have one default ('else') arm"));
+    CHECK_EQ(firstError("match x { 1 print(1) }"), std::string("expected '=>' after the match pattern, found identifier 'print'"));
+}
+
+TEST(parser_f_strings) {
+    CHECK_EQ(expr("f\"x = {x + 1:>4}!\""), std::string("(f \"x = \" (+ x 1):>4 \"!\")"));
+    CHECK_EQ(expr("f\"{a}{b}\""), std::string("(f a b)"));
+    CHECK(firstError("f\"{a ? b : c}\"").find("put a conditional expression in parentheses") != std::string::npos);
+    CHECK(parse("f\"{(a ? b : c)}\"").errors.empty());
 }

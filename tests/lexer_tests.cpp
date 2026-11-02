@@ -60,13 +60,13 @@ TEST(lexer_keywords_and_word_operators) {
 TEST(lexer_numbers) {
     auto result = tokens("42 3.25 1e3 2.5e-2 1_000_000");
     CHECK(result[0].type == TokenType::Int);
-    CHECK_EQ(result[0].intValue, 42);
+    CHECK_EQ(result[0].intValue, 42u);
     CHECK(result[1].type == TokenType::Float);
     CHECK_EQ(result[1].floatValue, 3.25);
     CHECK(result[2].type == TokenType::Float);
     CHECK_EQ(result[2].floatValue, 1000.0);
     CHECK_EQ(result[3].floatValue, 0.025);
-    CHECK_EQ(result[4].intValue, 1000000);
+    CHECK_EQ(result[4].intValue, 1000000u);
 }
 
 TEST(lexer_number_followed_by_method_call) {
@@ -75,11 +75,22 @@ TEST(lexer_number_followed_by_method_call) {
 }
 
 TEST(lexer_strings_and_escapes) {
-    auto result = tokens(R"("a\tb\n" 'it\'s' "\x41\\")");
+    auto result = tokens(R"("a\tb\n" "it's \"quoted\"" "\x41\\" "\u{e9}")");
     CHECK(result[0].type == TokenType::String);
     CHECK_EQ(result[0].text, std::string("a\tb\n"));
-    CHECK_EQ(result[1].text, std::string("it's"));
+    CHECK_EQ(result[1].text, std::string("it's \"quoted\""));
     CHECK_EQ(result[2].text, std::string("A\\"));
+    CHECK_EQ(result[3].text, std::string("\xC3\xA9"));  // U+00E9 in UTF-8
+}
+
+TEST(lexer_char_literals) {
+    auto result = tokens(R"('a' '\n' '\'' 'é' '\u{1F600}')");
+    CHECK(result[0].type == TokenType::Char);
+    CHECK(result[0].charValue == U'a');
+    CHECK(result[1].charValue == U'\n');
+    CHECK(result[2].charValue == U'\'');
+    CHECK(result[3].charValue == U'\u00e9');
+    CHECK(result[4].charValue == U'\U0001F600');
 }
 
 TEST(lexer_comments_are_skipped) {
@@ -112,7 +123,9 @@ TEST(lexer_positions) {
 TEST(lexer_errors) {
     CHECK_EQ(firstError("\"abc"), std::string("unterminated string (missing closing \")"));
     CHECK_EQ(firstError("/* never closed"), std::string("unterminated block comment (missing '*/')"));
-    CHECK_EQ(firstError("a & b"), std::string("unexpected character '&' (use '&&' or 'and' for logical AND)"));
+    CHECK_EQ(firstError("'ab'"), std::string("a char literal holds exactly one character; use double quotes for strings"));
+    CHECK_EQ(firstError("''"), std::string("empty char literal ''"));
+    CHECK_EQ(firstError("x := 3$"), std::string("unexpected character '$'"));
     CHECK_EQ(firstError("x := @"), std::string("unexpected character '@'"));
     CHECK_EQ(firstError("\"\\q\""), std::string("unknown escape sequence '\\q'"));
     CHECK_EQ(firstError("12abc"), std::string("invalid number '12abc'"));
@@ -123,4 +136,46 @@ TEST(lexer_reports_unterminated_comment_for_repl) {
     Lexer lexer("x := 1 /* still typing");
     lexer.tokenize();
     CHECK(lexer.endedInsideComment());
+}
+
+TEST(lexer_number_bases_and_suffixes) {
+    auto result = tokens("0xFF 0b1010 0o17 1_000u16 255u8 7i64 2.5f32 3f64 0xFFu8 0x1f32");
+    CHECK_EQ(result[0].intValue, 255u);
+    CHECK_EQ(result[1].intValue, 10u);
+    CHECK_EQ(result[2].intValue, 15u);
+    CHECK_EQ(result[3].intValue, 1000u);
+    CHECK(result[3].numKind == ascend::NumKind::U16);
+    CHECK(result[4].numKind == ascend::NumKind::U8);
+    CHECK(result[5].numKind == ascend::NumKind::I64);
+    CHECK(result[6].type == TokenType::Float);
+    CHECK(result[6].numKind == ascend::NumKind::F32);
+    CHECK(result[7].type == TokenType::Float);  // a float suffix makes an integer literal a float
+    CHECK(result[8].numKind == ascend::NumKind::U8);
+    CHECK_EQ(result[9].intValue, 0x1f32u);  // 'f' is a hex digit, not a suffix
+    CHECK_EQ(firstError("10u9"), std::string("invalid number '10u9'"));
+    CHECK_EQ(firstError("0b102"), std::string("invalid number '0b102'"));
+    CHECK_EQ(firstError("1.5i32"), std::string("'i32' is an integer type, but 1.5 has a fraction or exponent"));
+}
+
+TEST(lexer_bitwise_and_arrow_operators) {
+    std::vector<TokenType> expected = {
+        TokenType::Ampersand,     TokenType::Pipe,      TokenType::Caret,          TokenType::Tilde,
+        TokenType::ShiftLeft,     TokenType::ShiftRight, TokenType::AmpersandEqual, TokenType::PipeEqual,
+        TokenType::CaretEqual,    TokenType::ShiftLeftEqual, TokenType::ShiftRightEqual, TokenType::Arrow,
+        TokenType::FatArrow,      TokenType::Const,     TokenType::Match,          TokenType::Eof};
+    CHECK(types("& | ^ ~ << >> &= |= ^= <<= >>= -> => const match") == expected);
+}
+
+TEST(lexer_f_strings) {
+    std::vector<TokenType> expected = {
+        TokenType::FStringStart, TokenType::String,     TokenType::InterpStart, TokenType::Identifier,
+        TokenType::InterpEnd,    TokenType::String,     TokenType::InterpStart, TokenType::Identifier,
+        TokenType::LeftBracket,  TokenType::String,     TokenType::RightBracket, TokenType::FormatSpec,
+        TokenType::InterpEnd,    TokenType::FStringEnd, TokenType::Eof};
+    CHECK(types(R"(f"Hi {name}, {{x}} {m["k"]:>5}")") == expected);
+    auto result = tokens(R"(f"a{{b}}c {x:>5}")");
+    CHECK_EQ(result[1].text, std::string("a{b}c "));
+    CHECK_EQ(result[4].text, std::string(">5"));
+    CHECK_EQ(firstError("f\"{x\""), std::string("unterminated string (missing closing \")"));
+    CHECK_EQ(firstError("f\"oops }\""), std::string("single '}' in f-string (write '}}' for a literal brace)"));
 }

@@ -3,6 +3,7 @@
 
 #include "ast.hpp"
 #include "environment.hpp"
+#include "error.hpp"
 #include "value.hpp"
 
 #include <cstddef>
@@ -11,6 +12,8 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ascend {
@@ -20,6 +23,7 @@ struct ThrownValue {
     Value value;
     int line;
     int column;
+    const SourceFile* source;
 };
 
 // Raised by exit(). Unwinds the whole program; `try` does not catch it.
@@ -36,12 +40,16 @@ public:
     Interpreter& operator=(const Interpreter&) = delete;
 
     // Runs a parsed (and analyzed) program in the global scope. The
-    // interpreter keeps the program alive, since functions point into it.
-    // Throws RuntimeError, ThrownValue or ExitRequest.
-    void execute(std::unique_ptr<Program> program);
+    // interpreter keeps the program and its source alive, since functions
+    // point into them. Throws RuntimeError, ThrownValue or ExitRequest.
+    void execute(std::unique_ptr<Program> program, std::unique_ptr<SourceFile> source = nullptr);
 
     // Calls an Ascend or builtin function. `line`/`column` locate errors.
     Value call(const Value& callee, std::vector<Value> args, int line = 0, int column = 0);
+
+    // Runs another Ascend file (once) and returns its top-level names as a
+    // map. Relative paths are relative to the file that is running.
+    Value importModule(const std::string& path);
 
     // Operations shared with the standard library.
     Value binaryOp(TokenType op, const Value& left, const Value& right);
@@ -54,7 +62,10 @@ public:
     std::shared_ptr<ListObj> newList(std::vector<Value> items = {});
     std::shared_ptr<MapObj> newMap();
 
+    // Builtins live in a scope above the program's globals, so a program
+    // (or module) can reuse their names for its own variables.
     void defineNative(const std::string& name, int minArgs, int maxArgs, NativeFn fn);
+    void defineBuiltin(const std::string& name, Value value);
     void defineGlobal(const std::string& name, Value value);
     const std::shared_ptr<Environment>& globals() const { return globals_; }
 
@@ -77,14 +88,19 @@ public:
 private:
     enum class Flow { Normal, Break, Continue, Return };
     using EnvPtr = std::shared_ptr<Environment>;
+    class FrameGuard;
 
+    void runTopLevel(const Program& program, const EnvPtr& env, bool echo);
     Flow exec(const Stmt& stmt, const EnvPtr& env);
     Flow execStmt(const Stmt& stmt, const EnvPtr& env);
     Flow execBlock(const Block& block, const EnvPtr& env);
     Flow execScoped(const Block& block, const EnvPtr& env);
+    Flow execDeclare(const DeclareStmt& stmt, const EnvPtr& env);
     Flow execAssign(const AssignStmt& stmt, const EnvPtr& env);
     Flow execFor(const ForStmt& stmt, const EnvPtr& env);
     Flow execTry(const TryStmt& stmt, const EnvPtr& env);
+    Flow execMatch(const MatchStmt& stmt, const EnvPtr& env);
+    Flow execReturn(const ReturnStmt& stmt, const EnvPtr& env);
     void hoistFunctions(const Block& block, const EnvPtr& env);
 
     Value eval(const Expr& expr, const EnvPtr& env);
@@ -93,9 +109,15 @@ private:
     Value evalVariable(const VariableExpr& expr, const EnvPtr& env);
     Value evalUnary(const UnaryExpr& expr, const EnvPtr& env);
     Value evalMember(const MemberExpr& expr, const EnvPtr& env);
+    Value evalFString(const FStringExpr& expr, const EnvPtr& env);
     Value makeFunction(const FunctionExpr& expr, const EnvPtr& env, const std::string& name);
     void indexSet(const Value& object, const Value& index, Value value);
+
+    Value zeroValue(const TypeSpec& type);
+    Value coerceVariable(const std::string& name, const TypeSpec& type, Value value);
+    void locate(RuntimeError& error, int line, int column) const;
     void checkStack() const;
+    std::string importDirectory() const;
 
     template <typename T>
     std::shared_ptr<T> track(std::shared_ptr<T> object);
@@ -103,10 +125,16 @@ private:
     std::ostream& out_;
     std::istream& in_;
     std::mt19937_64 random_;
+    EnvPtr builtins_;
     EnvPtr globals_;
     std::vector<std::unique_ptr<Program>> programs_;
+    std::vector<std::unique_ptr<SourceFile>> sources_;
+    std::unordered_map<std::string, Value> modules_;
+    std::unordered_set<std::string> loadingModules_;
     Value returnValue_;
     const Callable* rangeFunction_ = nullptr;
+    const SourceFile* currentSource_ = nullptr;
+    const FunctionExpr* currentFunction_ = nullptr;
     bool replMode_ = false;
     int callDepth_ = 0;
     int maxCallDepth_;

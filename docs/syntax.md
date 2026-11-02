@@ -1,12 +1,12 @@
 # Ascend language guide
 
-Ascend is a small, dynamically typed scripting language. This page covers the
-whole language; the builtin functions are listed in
+Ascend is a small scripting language with optional static-style types. This
+page covers the whole language; the builtin functions are listed in
 [standard_library.md](standard_library.md).
 
 ```
-func greet(name, greeting = "Hello") {
-    return greeting + ", " + name + "!"
+func greet(name: string, greeting: string = "Hello") -> string {
+    return f"{greeting}, {name}!"
 }
 
 for name in ["Ada", "Grace"] {
@@ -28,52 +28,110 @@ statements on one line: `a := 1; b := 2`.
 A statement can continue on the next line after an operator (`x := 1 +`) or
 inside `( )` and `[ ]`, so long calls and lists can span several lines.
 
-## Values
+## Variables and types
 
-| Type       | Examples                       | Notes |
-|------------|--------------------------------|-------|
-| `null`     | `null`                         | the absence of a value |
-| `bool`     | `true`, `false`                | |
-| `int`      | `42`, `-7`, `1_000_000`        | 64-bit; overflow is an error, not a silent wrap |
-| `float`    | `3.14`, `2.5e-3`, `1.0`        | 64-bit IEEE double |
-| `string`   | `"hi\n"`, `'it\'s'`            | escapes: `\n \t \r \0 \\ \" \' \xHH` |
-| `list`     | `[1, "two", 3.0]`              | |
-| `map`      | `{name: "Ada", "a key": 1}`    | insertion ordered |
-| `function` | `func(x) { return x * 2 }`     | |
+Types are optional. Write `name := value` to let the value decide, or
+`name: type = value` to fix the variable's type:
 
-`type(value)` returns the type name as a string.
+```
+count := 0            // no declared type
+age: u8 = 30          // always a u8
+ratio: f32 = 0.5
+initial: char = 'A'
+title: string = "Ascend"
+nickname: string?     // the ? allows null; without a value this starts as null
+total: i64            // without a value it starts at zero
+```
 
-Lists, maps and functions are **references**: `b := a` makes `b` refer to the
-same list as `a`. Use `copy(a)` for a shallow copy.
+`=` changes an existing variable (`count = 5`, `count += 1`). Assigning to a
+name that was never declared is an error, which catches typos.
+
+A typed variable only ever holds values of its type. Numbers convert
+automatically when nothing is lost; anything else is an error:
+
+```
+age: u8 = 30
+age = 31          // fine
+age = 300         // error: 'age' is declared as u8, so it can't hold 300 (u8 is 0 to 255)
+age = "old"       // error: ... can't hold a string (use u8(...) to convert a string)
+x: i32 = 2.0      // fine: 2.0 is a whole number
+x = 2.5           // error: ... (use i32(...) to drop the fraction)
+```
+
+Mistakes in literals like `age: u8 = 300` are reported before the program
+starts running.
+
+### The types
+
+| Type | Values |
+|------|--------|
+| `i8` `i16` `i32` `i64` | signed integers of 8, 16, 32 and 64 bits |
+| `u8` `u16` `u32` `u64` | unsigned integers; `byte` is another name for `u8` |
+| `int` | the type of integer literals like `42`: a 64-bit signed integer |
+| `f32` `f64` | 32- and 64-bit floating point numbers |
+| `float` | the type of float literals like `1.5`: a 64-bit float |
+| `bool` | `true`, `false` |
+| `char` | one Unicode character: `'a'`, `'\n'`, `'é'` |
+| `string` | text: `"hello"` |
+| `list` | `[1, "two", 3.0]` |
+| `map` | `{name: "Ada", "a key": 1}` |
+| `func` | a function |
+| `any` | anything (the same as writing no type) |
+| `void` | only as a return type: the function returns nothing |
+| `T?` | `T` or `null`, e.g. `string?` |
+
+`type(value)` returns the type's name: `type(5)` is `"int"`, `type(u8(5))` is
+`"u8"`, `type('a')` is `"char"`.
+
+Without a value, a typed variable starts at its type's zero value: `0`,
+`0.0`, `false`, `""`, `'\0'`, `[]` or `{}` (and `null` for `T?` types).
+
+### Constants
+
+```
+const MAX_PLAYERS = 4
+const RATE: f64 = 0.07
+MAX_PLAYERS = 5      // error: can't change 'MAX_PLAYERS': it's a constant
+```
+
+### Converting between types
+
+Every type name is also a conversion function: `i32("42")`, `u8(3.9)` (drops
+the fraction), `f32(1)`, `char(65)`, `string(12)`, `byte('A')`, `int("0xFF")`.
+A conversion fails if the value doesn't fit: `u8(300)` and `i8(-129)` are
+errors.
 
 ### Truthiness
 
-`false`, `null`, `0`, `0.0`, `""`, `[]` and `{}` are falsy. Everything else is
-truthy.
+`false`, `null`, `0`, `0.0`, `'\0'`, `""`, `[]` and `{}` are falsy. Everything
+else is truthy.
 
-## Variables
-
-```
-count := 0      // declare a new variable
-count = 5       // change an existing variable
-count += 1      // also -=, *=, /=, %=
-```
-
-`:=` creates a variable in the current scope; `=` changes one that already
-exists (assigning to an undeclared name is an error, which catches typos).
-
-Every `{ }` block is a scope. A `:=` inside a block creates a new variable
-that disappears at the end of the block, even if a variable with the same
-name exists outside:
+## Numbers
 
 ```
-x := 1
-if true {
-    x := 2      // a new x, only inside this block
-    x = 3       // changes the inner x
-}
-print(x)        // 1
+42      -7      1_000_000          // int
+3.14    2.5e-3  1.0                // float
+0xFF    0b1010  0o17               // hex, binary and octal
+255u8   -128i8  7i64  1.5f32       // a suffix sets the type
 ```
+
+How arithmetic picks its result type:
+
+- A plain literal adapts to the other side: with `x: u8`, `x + 1` is a `u8`.
+- Two different integer types give the smallest type that holds both:
+  `u8 + i32` is an `i32`, `u8 + i8` is an `i16`. (`u64` can't be mixed with
+  signed types; convert one side.)
+- An integer and a float give the float's type: `i32 + f32` is an `f32`.
+- `f32` and `f64` give `f64`.
+
+**Overflow is an error**, never a silent wrap: with `x: u8 = 250`, `x + 10`
+reports `integer overflow: 250 + 10 doesn't fit in u8 (0 to 255)`.
+
+- `int / int` truncates toward zero (`7 / 2 == 3`). If either side is a float
+  the result is a float (`7 / 2.0 == 3.5`).
+- `%` has the sign of the left side (`-7 % 3 == -1`), like C and JavaScript.
+- Dividing by zero is an error.
+- `f32` values are kept at 32-bit precision: `f32(1) / 3` is `0.33333334`.
 
 ## Operators
 
@@ -87,36 +145,70 @@ From lowest to highest precedence:
 | `not`, `!`                      | logical not |
 | `==`, `!=`                      | equality (deep for lists and maps; `1 == 1.0`) |
 | `<`, `<=`, `>`, `>=`, `in`      | comparison; `x in list`, `key in map`, `"sub" in string` |
+| `\|`                            | bitwise or |
+| `^`                             | bitwise xor |
+| `&`                             | bitwise and |
+| `<<`, `>>`                      | shifts |
 | `+`, `-`                        | add, subtract, concatenate |
 | `*`, `/`, `%`                   | multiply, divide, remainder |
-| `-x`                            | negation |
+| `-x`, `~x`                      | negation, bitwise not |
 | `**`                            | power (right associative, `-2 ** 2 == -4`) |
 | `f(x)`, `a[i]`, `a[i:j]`, `m.k` | call, index, slice, field |
 
-`and`, `or` and `not` always produce `true` or `false`.
+Notes:
 
-`not` applies to the whole comparison after it, so `not x in items` means
-`not (x in items)`.
-
-Arithmetic details:
-
-- `int / int` truncates toward zero (`7 / 2 == 3`). If either side is a float
-  the result is a float (`7 / 2.0 == 3.5`).
-- `%` has the sign of the left side (`-7 % 3 == -1`), like C and JavaScript.
-- Dividing by zero is an error.
+- Bitwise operators bind tighter than comparisons (unlike C), so
+  `flags & 1 == 0` means `(flags & 1) == 0`.
+- Shifts keep the left side's type and drop bits shifted out of it:
+  `0xF0u8 << 1` is `224`. `>>` is arithmetic for signed types.
+- `~x` flips the bits within the type: `~0u8` is `255`, `~0` is `-1`.
+- Compound assignment works for every operator: `+= -= *= /= %= &= |= ^= <<= >>=`.
+- `and`, `or` and `not` always produce `true` or `false`. `not` applies to the
+  whole comparison after it: `not x in items` means `not (x in items)`.
 - `+` with a string on either side converts the other side to a string:
   `"total: " + 5`.
 - `"ab" * 3` repeats a string; `[0] * 3` repeats a list; `[1] + [2]` joins lists.
 
-## Strings, lists and maps
+## Strings and chars
+
+Strings use double quotes; single quotes are for a single `char`.
 
 ```
-s := "hello"
-s[0]        // "h"
-s[-1]       // "o"   (negative indexes count from the end)
-s[1:3]      // "el"  (slices; either bound may be left out: s[2:], s[:2])
-len(s)      // 5
+s := "héllo"
+len(s)       // 5: lengths, indexes and slices count characters (Unicode code points)
+s[1]         // 'é' (a char)
+s[-1]        // 'o' (negative indexes count from the end)
+s[1:3]       // "él"
+"ll" in s    // true
+```
 
+Escapes: `\n \t \r \0 \\ \" \' \{ \}`, `\xHH` (a character code in hex) and
+`\u{1F600}` (any Unicode character).
+
+Chars support a little arithmetic: `'a' + 1 == 'b'`, `'z' - 'a' == 25`,
+`'-' * 3 == "---"`. A char equals the one-character string holding it
+(`'a' == "a"`), and `char + string` concatenates.
+
+Strings are immutable. Use `bytes(s)` for the raw UTF-8 bytes.
+
+### f-strings
+
+An `f` before a string makes `{...}` insert the value of an expression:
+
+```
+name := "Ada"
+print(f"Hello, {name}! Next year you'll be {age + 1}.")
+print(f"{price:.2f}  {count:>5}  {name:<10}|  {255:x}  {1234567:,}  {0.5:%}")
+```
+
+The part after `:` is a format spec: `[[fill]align][sign][0][width][,][.precision][type]`
+with align `<` `>` `^`, and type `d` `x` `X` `o` `b` `f` `e` `g` `%` `s` `c`.
+`{{` and `}}` are literal braces. Put a conditional expression in parentheses:
+`{(ok ? "yes" : "no")}`. The same specs work with `format("{:>5}", x)`.
+
+## Lists and maps
+
+```
 items := [10, 20, 30]
 items[0] = 11
 items.push(40)          // see "Method calls" below
@@ -131,12 +223,13 @@ person.city = "London"  // adds a key
 
 In a map literal, a bare name before `:` is a string key (`{name: 1}` is
 `{"name": 1}`). Put an expression in parentheses to use its value as the key:
-`{(key): 1}`. Keys may be strings, numbers, bools or `null`.
+`{(key): 1}`. Keys may be strings, numbers, chars, bools or `null`.
 
 Reading a missing map key or an out-of-range index is an error. Use
 `get(map, key, default)` when a key may be missing.
 
-Strings are immutable sequences of bytes.
+Lists, maps and functions are **references**: `b := a` makes `b` refer to the
+same list as `a`. Use `copy(a)` for a shallow copy.
 
 ## Control flow
 
@@ -159,7 +252,7 @@ for i in range(5) { }            // 0, 1, 2, 3, 4
 for i in range(2, 10, 2) { }     // 2, 4, 6, 8
 for item in items { }
 for i, item in items { }         // index and item
-for ch in "text" { }
+for c in "text" { }              // chars
 for key in person { }            // map keys
 for key, value in person { }
 ```
@@ -168,17 +261,41 @@ for key, value in person { }
 Each loop iteration gets fresh loop variables, so closures created in a loop
 capture the value from their own iteration.
 
+### match
+
+`match` runs the first arm whose value equals the subject:
+
+```
+match command {
+    "start", "go" => start()
+    "stop" => {
+        save()
+        stop()
+    }
+    else => print("unknown command")     // `_ =>` works too
+}
+```
+
+Each arm is a single statement or a `{ }` block. If nothing matches and there
+is no `else` arm, nothing happens. `break`, `continue` and `return` inside an
+arm affect the surrounding loop or function.
+
 ## Functions
 
 ```
-func area(width, height = width) {
+func area(width: f64, height: f64 = width) -> f64 {
     return width * height
 }
 
-area(3)       // 9
-area(3, 4)    // 12
+area(3)       // 9.0
+area(3, 4)    // 12.0
 ```
 
+- Parameter and return types are optional. Arguments are converted to the
+  parameter's type (an `int` passed to an `f64` parameter becomes a float) or
+  rejected: `area("big")` is an error.
+- `-> void` means the function returns nothing; `-> T?` allows returning `null`.
+  A function with a return type that ends without `return` is an error.
 - A function without `return` (or with a bare `return`) returns `null`.
 - Parameters with default values must come after the ones without.
 - Functions declared with `func name(...)` can be called anywhere in the block
@@ -214,9 +331,24 @@ dog := {name: "Rex", speak: func() { return "Woof" }}
 dog.speak()
 ```
 
+## Modules
+
+`import(path)` runs another Ascend file once and returns its top-level names
+as a map. Paths are relative to the importing file, and `.asc` can be left out.
+Names starting with `_` stay private.
+
+```
+// geometry.asc
+func circle_area(r: f64) -> f64 { return PI * r ** 2 }
+
+// main.asc
+geometry := import("geometry")
+print(geometry.circle_area(2))
+```
+
 ## Errors
 
-Runtime errors stop the program with a message that points at the problem:
+Errors stop the program with a message that points at the problem:
 
 ```
 script.asc:2:9: runtime error: division by zero
@@ -250,11 +382,12 @@ as a "stack overflow" error instead of crashing.
 ascend                       interactive REPL
 ascend file.asc [args...]    run a program; extra arguments are in the list `args`
 ascend -e 'print(1 + 2)'     run code from the command line
+ascend --check file.asc      report errors without running the program
 ```
 
-Exit codes: `0` success, `65` syntax error, `70` runtime error, or the value
-passed to `exit()`. A first line starting with `#!` is ignored, so scripts can
-start with `#!/usr/bin/env ascend`.
+Exit codes: `0` success, `65` syntax or type error found before running, `70`
+runtime error, or the value passed to `exit()`. A first line starting with
+`#!` is ignored, so scripts can start with `#!/usr/bin/env ascend`.
 
 In the REPL, the value of an expression is printed automatically, and
 unfinished input (like an open `{`) continues on a `...` prompt.
