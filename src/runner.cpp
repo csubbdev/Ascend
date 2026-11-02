@@ -54,6 +54,7 @@ RunResult runSource(Interpreter& interpreter, const std::string& source, const R
     }
 
     SemanticAnalyzer analyzer;
+    analyzer.checkTypeNames = !options.repl;
     std::vector<Diagnostic> problems = analyzer.analyze(*program);
     if (!problems.empty()) {
         report(problems, "error");
@@ -61,11 +62,21 @@ RunResult runSource(Interpreter& interpreter, const std::string& source, const R
     }
     if (options.checkOnly) return {RunStatus::Ok, 0};
 
+    // Like C, a program with a main() function runs it after the top-level
+    // code, unless the program calls it itself.
+    const bool callMain = !options.repl && analyzer.shouldCallMain();
     auto file = std::make_unique<SourceFile>();
     file->name = options.filename;
     file->text = source;
     try {
         interpreter.execute(std::move(program), std::move(file));
+        if (callMain) {
+            int code = interpreter.runMain();
+            if (code != 0) {
+                interpreter.out().flush();
+                return {RunStatus::Exited, code};
+            }
+        }
     } catch (const RuntimeError& error) {
         reportAt(error.source, error.line, error.column, error.what());
         return {RunStatus::RuntimeError, kExitRuntimeError};

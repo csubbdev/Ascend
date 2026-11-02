@@ -35,7 +35,8 @@ directory on your `PATH`, or run `cmake --install build` (add
 
 ```sh
 apkg install colors                     # see docs/packages.md
-ascend -e 'print(import("colors").bold("ready"))'
+ascend -e 'import colors
+print(colors.bold("ready"))'
 ```
 
 ## Test

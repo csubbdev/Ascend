@@ -8,7 +8,7 @@
 
 namespace ascend {
 
-constexpr const char* kVersion = "0.4.0";
+constexpr const char* kVersion = "0.5.0";
 
 // Process exit codes (following the BSD sysexits convention).
 constexpr int kExitSyntaxError = 65;

@@ -17,7 +17,7 @@ enum class TokenType {
     Comma, Dot, Colon, Semicolon, Question, Arrow /* -> */, FatArrow /* => */,
 
     // Operators
-    Plus, Minus, Star, StarStar, Slash, Percent,
+    Plus, Minus, Star, StarStar, Slash, Percent, PlusPlus, MinusMinus,
     Ampersand, Pipe, Caret, Tilde, ShiftLeft, ShiftRight,
     Equal, EqualEqual, NotEqual, Less, LessEqual, Greater, GreaterEqual,
     Declare,  // :=

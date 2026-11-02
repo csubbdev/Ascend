@@ -15,6 +15,17 @@ change their argument.
 | `print(values...)` | Prints the values separated by spaces, then a newline. `print()` prints an empty line. |
 | `input(prompt?)` | Prints `prompt` (if given) and reads a line from standard input. Returns `null` at end of input. |
 | `format(template, values...)` | Fills each `{}` in the template with the next value; `{0}` picks a value by position and `{:spec}` formats it like an f-string: `format("{:>6.2f}", x)`. |
+| `printf(format, values...)` | Prints values with a C format string, without adding a newline: `printf("%-10s %5.2f\n", name, price)`. See below. |
+| `sprintf(format, values...)` | The same, but returns the text instead of printing it. |
+
+`printf` and `sprintf` understand C's conversions: `%d` `%i` `%u` (integers;
+a char gives its code), `%f` `%e` `%g` (and `%F` `%E` `%G`), `%x` `%X` `%o`
+and `%b` (hex, octal, binary), `%c` (a char, or a character code), `%s` (any
+value, as `print` shows it) and `%%`, with the flags `-` (left-align), `+`,
+space, `0` (pad with zeros) and `#` (`0x` prefix), a width and a
+`.precision`, either of which can be `*` to take it from the values. Length
+modifiers like `l`, `ll` and `z` are accepted and ignored. Giving more or
+fewer values than the format uses is an error.
 
 ## Types and conversion
 
@@ -22,10 +33,10 @@ Each type name converts a value to that type, and fails if it doesn't fit.
 
 | Function | Description |
 |----------|-------------|
-| `type(x)` | The type's name: `"int"`, `"u8"`, `"f32"`, `"char"`, `"string"`, `"list"`, `"map"`, `"func"`, `"bool"`, `"null"`, ... |
-| `int(x)`, `i8(x)`, `i16(x)`, `i32(x)`, `i64(x)` | Convert to a signed integer type. Floats drop their fraction; chars give their code; strings are parsed (decimal, or `0x`/`0b`/`0o`). |
+| `type(x)` | The type's name: `"int"`, `"u8"`, `"f32"`, `"char"`, `"string"`, `"list"`, `"map"`, `"func"`, `"bool"`, `"null"`, ..., or a struct's name like `"Point"`. |
+| `int(x)`, `i8(x)`, `i16(x)`, `i32(x)`, `i64(x)`, `short(x)`, `long(x)` | Convert to a signed integer type. Floats drop their fraction; chars give their code; strings are parsed (decimal, or `0x`/`0b`/`0o`). |
 | `u8(x)`, `u16(x)`, `u32(x)`, `u64(x)`, `byte(x)` | The same for unsigned types. `u8(-1)` and `u8(256)` are errors. |
-| `float(x)`, `f32(x)`, `f64(x)` | Convert a number, bool or numeric string to a float type. |
+| `float(x)`, `f32(x)`, `f64(x)`, `double(x)` | Convert a number, bool or numeric string to a float type. |
 | `char(x)` | A char from a character code (`char(65)` is `'A'`) or a one-character string. |
 | `str(x)`, `string(x)` | `x` as a string, the way `print` shows it. |
 | `repr(x)` | `x` as source-like text (strings and chars are quoted and escaped). |
@@ -59,7 +70,7 @@ Each type name converts a value to that type, and fails if it doesn't fit.
 | `reduce(list, f, initial?)` | Combines the elements: `reduce([1, 2, 3], func(a, b) { return a + b })` is `6`. |
 | `find(list, f)` | The first element for which `f(element)` is truthy, or `null`. |
 | `any(list, f?)`, `all(list, f?)` | Whether any / all elements (or `f(element)`) are truthy. |
-| `copy(x)` | A shallow copy of a list or map. |
+| `copy(x)` | A shallow copy of a list, map or struct. |
 
 ## Maps
 
@@ -128,7 +139,7 @@ Lengths and positions count characters, not bytes.
 | `shuffle(list)` | The elements in random order. |
 | `seed(n)` | Seeds the random number generator for repeatable results. |
 
-## Files and JSON
+## Files, folders and JSON
 
 | Function | Description |
 |----------|-------------|
@@ -138,14 +149,30 @@ Lengths and positions count characters, not bytes.
 | `append_file(path, text)` | Adds `text` to the end of the file. |
 | `file_exists(path)` | `true` if the file can be opened. |
 | `delete_file(path)` | Deletes the file; returns `true` if it was deleted. |
+| `is_dir(path)` | `true` if `path` is a folder. |
+| `make_dir(path)` | Creates a folder (and the folders above it if needed). Returns `true` if it was created, `false` if it already existed. |
+| `list_dir(path?)` | The names of the files and folders in a folder (default: the current one), sorted. |
 | `json_parse(text)` | Converts JSON to Ascend values (objects become maps, arrays become lists). |
 | `json_stringify(value, indent?)` | Converts a value to JSON; with `indent`, pretty-prints with that many spaces. |
+
+## Regular expressions
+
+Patterns use JavaScript (ECMAScript) syntax. Remember to double backslashes in
+strings: `"\\d+"` is the pattern `\d+`.
+
+| Function | Description |
+|----------|-------------|
+| `regex_match(text, pattern)` | `true` if the whole text matches the pattern. |
+| `regex_search(text, pattern)` | The first match as a list: the matched text, then each group (`null` for groups that didn't match). `null` if there's no match. |
+| `regex_find_all(text, pattern)` | A list of every matching piece of text. |
+| `regex_replace(text, pattern, replacement)` | Replaces every match. In the replacement, `$1` is the first group, `$&` the whole match. |
+| `regex_split(text, pattern)` | Splits the text wherever the pattern matches. |
 
 ## Modules and program control
 
 | Function | Description |
 |----------|-------------|
-| `import(path)` | Runs another Ascend file once and returns its top-level names as a map. Relative paths start from the importing file; `.asc` is optional. If there's no such file, imports the installed package with that name (see [packages.md](packages.md)). |
+| `import(path)` | Runs another Ascend file once and returns its top-level names as a map. Relative paths start from the importing file; `.asc` is optional. If there's no such file, imports the installed package with that name (see [packages.md](packages.md)). The `import name` statement does the same and stores the map in a variable (see [syntax.md](syntax.md#modules)). |
 | `assert(condition, message?)` | Throws an error if `condition` is falsy. |
 | `exit(code?)` | Ends the program with exit code `code` (default 0). |
 | `args` | List of the extra command line arguments given after the script name. |

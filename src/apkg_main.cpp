@@ -36,7 +36,7 @@ void printUsage(std::ostream& out) {
            "\n"
            "Inside a project (a folder with an ascend.json) packages are installed into its\n"
            "ascend_packages folder and recorded in ascend.json. Anywhere else they're\n"
-           "installed for you, in ~/.ascend/packages. Programs use them with import(\"colors\").\n"
+           "installed for you, in ~/.ascend/packages. Programs use them with: import colors\n"
            "\n"
            "Environment:\n"
            "  ASCEND_HOME      where your packages and downloads are kept (default ~/.ascend)\n"

@@ -18,6 +18,7 @@ namespace ascend {
 class Environment;
 class Interpreter;
 struct FunctionExpr;
+struct StructStmt;
 struct ListObj;
 struct MapObj;
 struct Callable;
@@ -111,11 +112,30 @@ struct ListObj final : GcObject {
     void clearReferences() override { items.clear(); }
 };
 
+// The fields of a struct type, in declaration order.
+struct StructInfo {
+    std::string name;
+    std::vector<std::pair<std::string, TypeSpec>> fields;
+
+    // The declared type of a field, or nullptr if there's no such field.
+    const TypeSpec* fieldType(const std::string& field) const {
+        for (const auto& entry : fields) {
+            if (entry.first == field) return &entry.second;
+        }
+        return nullptr;
+    }
+};
+
 // An insertion-ordered hash map. Keys may be null, bools, numbers, chars or
 // strings. Equal numbers are the same key (m[1] and m[1.0]), and so are a char
 // and the one-character string holding it.
+//
+// A struct value is a map with `structInfo` set: its keys are the struct's
+// fields, and the interpreter checks the type of each value stored in them.
 struct MapObj final : GcObject {
     std::vector<std::pair<Value, Value>> entries;
+    std::shared_ptr<const StructInfo> structInfo;  // null for ordinary maps
+    std::string frozenAs;  // set for enums, whose members can't change: "enum Color"
 
     const Value* find(const Value& key) const;  // nullptr if missing (or unhashable)
     Value* find(const Value& key);
@@ -132,7 +152,7 @@ private:
 };
 
 struct Callable {
-    enum class Kind { Native, User };
+    enum class Kind { Native, User, Struct };
 
     explicit Callable(Kind kind) : kind(kind) {}
     virtual ~Callable() = default;
@@ -173,6 +193,30 @@ struct FunctionObj final : Callable, GcObject {
     std::shared_ptr<Environment> closure;
     const SourceFile* source;  // the file the function was written in
 };
+
+// A struct type, which is called to make values: Point(1, 2). It keeps the
+// scope it was declared in, where the fields' default values are evaluated.
+struct StructType final : Callable, GcObject {
+    StructType(std::shared_ptr<const StructInfo> info, const StructStmt* declaration,
+               std::shared_ptr<Environment> closure, const SourceFile* source)
+        : Callable(Kind::Struct),
+          info(std::move(info)),
+          declaration(declaration),
+          closure(std::move(closure)),
+          source(source) {}
+
+    GcObject* gcObject() override { return this; }
+    void forEachChild(const std::function<void(GcObject*)>& visit) const override;
+    void clearReferences() override { closure.reset(); }
+
+    std::shared_ptr<const StructInfo> info;
+    const StructStmt* declaration;  // owned by the interpreter's list of programs
+    std::shared_ptr<Environment> closure;
+    const SourceFile* source;
+};
+
+// The type name type() reports: "int", "string", ... or a struct's name.
+std::string typeNameOf(const Value& value);
 
 // str(): how print() shows a value (strings and chars without quotes).
 std::string toString(const Value& value);

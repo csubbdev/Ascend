@@ -43,8 +43,14 @@ string? nickname      // the ? allows null; without a value this starts as null
 i64 total             // without a value it starts at zero
 ```
 
-`=` changes an existing variable (`count = 5`, `count += 1`). Assigning to a
-name that was never declared is an error, which catches typos.
+`=` changes an existing variable (`count = 5`, `count += 1`, `count++`).
+Assigning to a name that was never declared is an error, which catches typos.
+
+Several variables of one type can be declared together, like in C:
+`i32 low = 0, high = 10`.
+
+`auto` declares a variable whose type is taken from its first value, like
+C++: after `auto total = 0`, `total` only holds ints.
 
 A typed variable only ever holds values of its type. Numbers convert
 automatically when nothing is lost; anything else is an error:
@@ -68,7 +74,8 @@ starts running.
 | `i8` `i16` `i32` `i64` | signed integers of 8, 16, 32 and 64 bits |
 | `u8` `u16` `u32` `u64` | unsigned integers; `byte` is another name for `u8` |
 | `int` | the type of integer literals like `42`: a 64-bit signed integer |
-| `f32` `f64` | 32- and 64-bit floating point numbers |
+| `short` `long` | other names for `i16` and `i64`, as in C |
+| `f32` `f64` | 32- and 64-bit floating point numbers; `double` is another name for `f64` |
 | `float` | the type of float literals like `1.5`: a 64-bit float |
 | `bool` | `true`, `false` |
 | `char` | one Unicode character: `'a'`, `'\n'`, `'é'` |
@@ -79,6 +86,7 @@ starts running.
 | `any` | anything (the same as writing no type) |
 | `void` | only as a return type: the function returns nothing |
 | `T?` | `T` or `null`, e.g. `string?` |
+| a struct's name | a value made by that struct, e.g. `Point` (see [Structs](#structs)) |
 
 `type(value)` returns the type's name: `type(5)` is `"int"`, `type(u8(5))` is
 `"u8"`, `type('a')` is `"char"`.
@@ -100,6 +108,10 @@ Every type name is also a conversion function: `i32("42")`, `u8(3.9)` (drops
 the fraction), `f32(1)`, `char(65)`, `string(12)`, `byte('A')`, `int("0xFF")`.
 A conversion fails if the value doesn't fit: `u8(300)` and `i8(-129)` are
 errors.
+
+C-style casts do the same: `(f64) total / count` converts `total` before
+dividing, `(i32) 3.9` is `3`, `(char) 65` is `'A'`. A cast binds tighter than
+the arithmetic operators.
 
 ### Truthiness
 
@@ -151,9 +163,9 @@ From lowest to highest precedence:
 | `<<`, `>>`                      | shifts |
 | `+`, `-`                        | add, subtract, concatenate |
 | `*`, `/`, `%`                   | multiply, divide, remainder |
-| `-x`, `~x`                      | negation, bitwise not |
+| `-x`, `~x`, `++x`, `--x`, `(type) x` | negation, bitwise not, increment, decrement, cast |
 | `**`                            | power (right associative, `-2 ** 2 == -4`) |
-| `f(x)`, `a[i]`, `a[i:j]`, `m.k` | call, index, slice, field |
+| `f(x)`, `a[i]`, `a[i:j]`, `m.k`, `x++`, `x--` | call, index, slice, field, increment, decrement |
 
 Notes:
 
@@ -163,6 +175,10 @@ Notes:
   `0xF0u8 << 1` is `224`. `>>` is arithmetic for signed types.
 - `~x` flips the bits within the type: `~0u8` is `255`, `~0` is `-1`.
 - Compound assignment works for every operator: `+= -= *= /= %= &= |= ^= <<= >>=`.
+- `x++` and `x--` add or subtract 1 and give the old value; `++x` and `--x`
+  give the new one. They work on variables, elements and fields
+  (`items[i]++`, `p.count--`) holding numbers or chars, and overflow is an
+  error like any other arithmetic.
 - `and`, `or` and `not` always produce `true` or `false`. `not` applies to the
   whole comparison after it: `not x in items` means `not (x in items)`.
 - `+` with a string on either side converts the other side to a string:
@@ -257,9 +273,73 @@ for key in person { }            // map keys
 for key, value in person { }
 ```
 
+Loop variables can have a type, and `:` can be used instead of `in`, like in
+C++ and Java: `for (string name : names) { }`.
+
 `break` leaves the innermost loop and `continue` skips to its next iteration.
 Each loop iteration gets fresh loop variables, so closures created in a loop
 capture the value from their own iteration.
+
+### C-style loops
+
+```
+for (i32 i = 0; i < 10; i++) { }           // init; condition; step
+for (i32 lo = 0, hi = n - 1; lo < hi; lo++, hi--) { }
+for i := 0; i < 10; i++ { }                // the parentheses are optional
+for (;;) { }                               // forever, until break
+for { }                                    // the same
+
+string? line
+do {
+    line = input("> ")
+} while (line != null and line != "quit")  // the body runs at least once
+```
+
+Variables declared in the first part belong to the loop. `continue` still
+runs the step.
+
+### Bodies without braces
+
+Like C, the body of an `if`, `else`, `while`, `for` or `do` can be a single
+statement instead of a `{ }` block, on the same line or the next one. A `;`
+alone is an empty body.
+
+```
+if (x < 0) x = -x
+else if (x == 0) print("zero")
+else
+    print("positive")
+
+while (i < n) i++
+while (busy());
+```
+
+When the condition is in parentheses, its `)` ends it, so the body can
+follow directly. (Without braces or parentheses, the condition would run on
+into the body.)
+
+### switch
+
+`switch` works like C: execution starts at the first `case` equal to the
+value (or at `default`) and continues into the cases after it until a
+`break`.
+
+```
+switch (command) {
+case "start":
+case "go":            // either word runs the next lines
+    start()
+    break
+case "stop", "halt":  // several values in one case
+    stop()
+    break
+default:
+    print("unknown command")
+}
+```
+
+`break` inside a switch leaves the switch; `continue` goes to the loop around
+it. For a version without fall-through, see `match` below.
 
 ### match
 
@@ -321,6 +401,11 @@ func add(a, b) {
   `func(i32 x) -> i32 { return x * 2 }`.
 - To store a function in a typed variable, use the type `func`:
   `func handler = print`.
+- Like C, if a program declares a top-level function `main` and never calls
+  it, `main()` runs after the rest of the file. It can take no parameters,
+  the list of command line arguments (`int main(list args)`), or a count and
+  the list (`int main(int argc, list argv)`). If it returns an integer, that's
+  the program's exit code.
 - Functions are closures: they keep access to the variables around them.
 
 ```
@@ -351,24 +436,83 @@ dog := {name: "Rex", speak: func() { return "Woof" }}
 dog.speak()
 ```
 
+## Structs
+
+A struct is a value with named, typed fields:
+
+```
+struct Point {
+    f64 x
+    f64 y = 0                 // a default value
+}
+
+struct Rect {
+    Point origin              // fields can be structs
+    f64 width, height         // several fields of one type
+    string label = "rect"
+}
+
+p := Point(1, 2)              // the fields in order
+q := Point(5)                 // missing fields get their default (or zero)
+Point origin                  // all defaults: Point(0, 0)
+print(p)                      // Point{x: 1.0, y: 2.0}
+p.x = 3                       // fields keep their types: p.x = "far" is an error
+type(p)                       // "Point"
+```
+
+- A struct's name is a type: `Point p = ...`, `f64 length(Point a, Point b)`,
+  `Point? find(...)`. A struct value only fits its own struct type.
+- Fields can't be added or removed, and reading a missing field is an error.
+- Two struct values are equal when they're the same struct with equal fields.
+- Structs are references, like maps; `copy(p)` makes a (shallow) copy.
+- Structs can be used before their declaration, like functions.
+- Functions that take a struct first can be called like methods:
+  `f64 area(Rect r) { ... }` can be called as `r.area()`.
+
+## Enums
+
+```
+enum Color { Red, Green, Blue = 10, Purple }
+
+Color.Green     // 1
+Color.Purple    // 11
+```
+
+An enum is a constant map from names to ints. Each member is one more than
+the one before it, starting at 0, unless it's given a value. Its members
+can't be changed. Members can be separated by commas or newlines.
+
 ## Modules
 
-`import(path)` runs another Ascend file once and returns its top-level names
-as a map. Paths are relative to the importing file, and `.asc` can be left out.
-Names starting with `_` stay private.
+`import` runs another Ascend file once and stores its top-level names in a
+map. Paths are relative to the importing file. Names starting with `_` stay
+private.
 
 ```
 // geometry.asc
 f64 circle_area(f64 r) { return PI * r ** 2 }
 
 // main.asc
-geometry := import("geometry")
+import geometry
 print(geometry.circle_area(2))
 ```
 
+```
+import geometry as geo             // choose the variable name
+import lib.shapes                  // the file lib/shapes.asc, stored as `shapes`
+import "../tools/strings.asc" as s // any path, in quotes
+import geometry, lib.shapes        // several at once
+from geometry import circle_area   // just some of the names
+from geometry import area as a, PI_2
+from geometry import *             // every exported name
+```
+
 If there's no such file, `import` looks for an installed package with that
-name, so after `apkg install colors` you can write `import("colors")`. See
+name, so after `apkg install colors` you can write `import colors`. See
 [packages.md](packages.md).
+
+`import(path)` also works as a function that returns the module's map:
+`geometry := import("geometry")`.
 
 ## Errors
 

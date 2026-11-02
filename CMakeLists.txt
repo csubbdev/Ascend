@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(ascend VERSION 0.4.0 LANGUAGES CXX)
+project(ascend VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -78,6 +78,7 @@ if(ASCEND_BUILD_TESTS)
         tests/lexer_tests.cpp
         tests/parser_tests.cpp
         tests/interpreter_tests.cpp
+        tests/language_tests.cpp
         tests/package_tests.cpp
     )
     target_link_libraries(ascend_tests PRIVATE ascend_core)

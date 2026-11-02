@@ -36,27 +36,44 @@ private:
 
     // Statements
     StmtPtr statement();
-    StmtPtr simpleStatement();
+    StmtPtr simpleStatement(bool requireEnd = true);
     StmtPtr ifStatement(const Token& keyword);
     StmtPtr whileStatement(const Token& keyword);
+    StmtPtr doStatement(const Token& keyword);
     StmtPtr forStatement(const Token& keyword);
+    StmtPtr cForStatement(const Token& keyword, bool parenthesized);
+    std::vector<StmtPtr> forClauses();
+    void loopVariable(std::string& name, TypeSpec& type);
+    StmtPtr switchStatement(const Token& keyword);
+    StmtPtr importStatement(const Token& keyword);
+    StmtPtr fromImportStatement(const Token& keyword);
+    std::string modulePath(std::string& lastPart);
+    StmtPtr structDeclaration(const Token& keyword);
+    StmtPtr enumDeclaration(const Token& keyword);
     StmtPtr returnStatement(const Token& keyword);
     StmtPtr tryStatement(const Token& keyword);
     StmtPtr throwStatement(const Token& keyword);
     StmtPtr functionDeclaration(const Token& keyword);
-    StmtPtr typedDeclaration();
+    StmtPtr typedDeclaration(bool requireEnd = true);
     StmtPtr typedFunctionDeclaration();
     StmtPtr constDeclaration(const Token& keyword);
     StmtPtr matchStatement(const Token& keyword);
     std::unique_ptr<FunctionExpr> functionRest(const Token& keyword, const std::string& name,
                                                const TypeSpec* returnType = nullptr);
-    TypeSpec parseType(bool allowVoid);
-    size_t typeLength(size_t offset) const;
+    TypeSpec parseType(bool allowVoid, bool allowStruct = true);
+    size_t typeLength(size_t offset, bool allowStruct = false) const;
+    bool isDeclaration(size_t typeTokens) const;
     static std::string unknownTypeMessage(const std::string& name);
     Block block(const std::string& what);
+    Block body(const std::string& what);
     static void noteStatement(Block& block, const Stmt& stmt);
     void parseStatementInto(Block& block);
     ExprPtr condition(const std::string& keyword);
+    size_t matchingParen(size_t open) const;
+    bool hasTopLevelSemicolon(size_t from, size_t to) const;
+    bool isWord(size_t ahead, const char* word) const;
+    bool looksLikeFromImport() const;
+    bool looksLikeSwitch() const;
     void expectStatementEnd();
     void synchronize();
 
@@ -105,6 +122,7 @@ private:
     std::vector<Diagnostic> errors_;
     bool incomplete_ = false;
     int depth_ = 0;
+    int functionCount_ = 0;  // functions parsed so far (to spot loop bodies that create closures)
     StackLimit stack_;
 };
 

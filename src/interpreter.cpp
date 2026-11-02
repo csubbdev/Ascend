@@ -417,7 +417,8 @@ void Interpreter::execute(std::unique_ptr<Program> program, std::unique_ptr<Sour
 void Interpreter::runTopLevel(const Program& program, const EnvPtr& env, bool echo) {
     hoistFunctions(program.body, env);
     for (const auto& stmt : program.body.statements) {
-        if (echo && stmt->kind == StmtKind::Expression) {
+        if (echo && stmt->kind == StmtKind::Expression &&
+            stmt->as<ExpressionStmt>().expr->kind != ExprKind::IncDec) {
             Value result = eval(*stmt->as<ExpressionStmt>().expr, env);
             if (!result.isNull()) out_ << toRepr(result) << '\n';
             continue;
@@ -552,18 +553,33 @@ Interpreter::Flow Interpreter::execStmt(const Stmt& stmt, const EnvPtr& env) {
             return Flow::Normal;
         }
 
-        case StmtKind::While: {
-            const auto& loop = stmt.as<WhileStmt>();
-            while (eval(*loop.condition, env).truthy()) {
-                Flow flow = execScoped(loop.body, env);
-                if (flow == Flow::Break) break;
-                if (flow == Flow::Return) return flow;
-            }
-            return Flow::Normal;
-        }
+        case StmtKind::While:
+            return execWhile(stmt.as<WhileStmt>(), env);
 
         case StmtKind::For:
             return execFor(stmt.as<ForStmt>(), env);
+
+        case StmtKind::CFor:
+            return execCFor(stmt.as<CForStmt>(), env);
+
+        case StmtKind::Switch:
+            return execSwitch(stmt.as<SwitchStmt>(), env);
+
+        case StmtKind::Import:
+            return execImport(stmt.as<ImportStmt>(), env);
+
+        case StmtKind::Struct:
+            return Flow::Normal;  // defined when its block started, like functions
+
+        case StmtKind::Enum:
+            return execEnum(stmt.as<EnumStmt>(), env);
+
+        case StmtKind::Group:
+            for (const auto& inner : stmt.as<GroupStmt>().statements) {
+                Flow flow = exec(*inner, env);
+                if (flow != Flow::Normal) return flow;
+            }
+            return Flow::Normal;
 
         case StmtKind::Break:
             return Flow::Break;
@@ -612,14 +628,20 @@ Interpreter::Flow Interpreter::execScoped(const Block& block, const EnvPtr& env)
 void Interpreter::hoistFunctions(const Block& block, const EnvPtr& env) {
     if (!block.hasFunctions) return;
     for (const auto& stmt : block.statements) {
-        if (stmt->kind != StmtKind::Function) continue;
-        const FunctionExpr& function = *stmt->as<FunctionStmt>().function;
-        env->define(function.name, makeFunction(function, env, function.name));
+        if (stmt->kind == StmtKind::Function) {
+            const FunctionExpr& function = *stmt->as<FunctionStmt>().function;
+            env->define(function.name, makeFunction(function, env, function.name));
+        } else if (stmt->kind == StmtKind::Struct) {
+            const auto& declaration = stmt->as<StructStmt>();
+            ErrorSite site(*this, stmt->line, stmt->column);
+            defineName(env, declaration.name, makeStruct(declaration, env));
+        }
     }
 }
 
-// The starting value of `type name` without an initializer.
-Value Interpreter::zeroValue(const TypeSpec& type) {
+// The starting value of `type name` without an initializer. A struct starts
+// with each field at its default: `Point p` is `Point()`.
+Value Interpreter::zeroValue(const TypeSpec& type, const EnvPtr& env) {
     if (type.nullable) return Value();
     switch (type.kind) {
         case TypeKind::Bool: return Value::fromBool(false);
@@ -629,9 +651,55 @@ Value Interpreter::zeroValue(const TypeSpec& type) {
         case TypeKind::String: return Value::fromString("");
         case TypeKind::List: return Value::fromList(newList());
         case TypeKind::Map: return Value::fromMap(newMap());
+        case TypeKind::Struct: {
+            Variable* variable = env->find(type.structName);
+            if (variable == nullptr || !variable->value.isFunction() ||
+                variable->value.asFunction().kind != Callable::Kind::Struct) {
+                throw RuntimeError("'" + type.structName + "' isn't a struct type");
+            }
+            Value constructor = variable->value;
+            return constructStruct(static_cast<StructType&>(constructor.asFunction()), {}, 0, 0);
+        }
         default: return Value();
     }
 }
+
+// Defines a name, unless it's a constant already defined in this scope.
+void Interpreter::defineName(const EnvPtr& env, const std::string& name, Value value, const TypeSpec& type,
+                             bool constant) {
+    Variable* existing = env->findLocal(name);
+    if (existing != nullptr && existing->constant) {
+        throw RuntimeError("'" + name + "' is a constant and can't be declared again");
+    }
+    env->define(name, std::move(value), type, constant);
+}
+
+namespace {
+
+// The type `auto x = value` gives x.
+TypeSpec typeOfValue(const Value& value) {
+    TypeSpec type;
+    switch (value.type()) {
+        case Value::Type::Null: break;
+        case Value::Type::Bool: type.kind = TypeKind::Bool; break;
+        case Value::Type::Int:
+        case Value::Type::Float:
+            type.kind = TypeKind::Number;
+            type.num = value.numKind();
+            break;
+        case Value::Type::Char: type.kind = TypeKind::Char; break;
+        case Value::Type::String: type.kind = TypeKind::String; break;
+        case Value::Type::List: type.kind = TypeKind::List; break;
+        case Value::Type::Map:
+            if (value.asMap().structInfo) return structType(value.asMap().structInfo->name);
+            type.kind = TypeKind::Map;
+            break;
+        case Value::Type::Function: type.kind = TypeKind::Function; break;
+    }
+    return type;
+}
+
+}  // namespace
 
 Value Interpreter::coerceVariable(const std::string& name, const TypeSpec& type, Value value) {
     if (type.isAny()) return value;
@@ -652,7 +720,7 @@ Interpreter::Flow Interpreter::execDeclare(const DeclareStmt& decl, const EnvPtr
 
     Value value;
     if (!decl.value) {
-        value = zeroValue(decl.type);
+        value = zeroValue(decl.type, env);
     } else if (decl.value->kind == ExprKind::Function) {
         // `name := func(...) {...}` gives the function a name for messages.
         const auto& function = decl.value->as<FunctionExpr>();
@@ -661,7 +729,7 @@ Interpreter::Flow Interpreter::execDeclare(const DeclareStmt& decl, const EnvPtr
         value = eval(*decl.value, env);
     }
     if (decl.hasType) value = coerceVariable(decl.name, decl.type, std::move(value));
-    env->define(decl.name, std::move(value), decl.type, decl.constant);
+    env->define(decl.name, std::move(value), decl.inferType ? typeOfValue(value) : decl.type, decl.constant);
     return Flow::Normal;
 }
 
@@ -730,7 +798,7 @@ Interpreter::Flow Interpreter::execAssign(const AssignStmt& stmt, const EnvPtr& 
             } else {
                 result = eval(*stmt.value, env);
             }
-            object.asMap().set(key, std::move(result));
+            setElement(object.asMap(), key, std::move(result));
             return Flow::Normal;
         }
 
@@ -768,10 +836,10 @@ Interpreter::Flow Interpreter::execFor(const ForStmt& loop, const EnvPtr& env) {
     auto iteration = [&](Value key, Value item) -> Flow {
         auto scope = newEnvironment(env);
         if (loop.second.empty()) {
-            scope->define(loop.first, std::move(item));
+            scope->define(loop.first, coerceVariable(loop.first, loop.firstType, std::move(item)), loop.firstType);
         } else {
-            scope->define(loop.first, std::move(key));
-            scope->define(loop.second, std::move(item));
+            scope->define(loop.first, coerceVariable(loop.first, loop.firstType, std::move(key)), loop.firstType);
+            scope->define(loop.second, coerceVariable(loop.second, loop.secondType, std::move(item)), loop.secondType);
         }
         return execBlock(loop.body, scope);
     };
@@ -837,6 +905,127 @@ Interpreter::Flow Interpreter::execFor(const ForStmt& loop, const EnvPtr& env) {
                                    " value (expected a list, map, string or range)",
                                loop.iterable->line, loop.iterable->column);
     }
+}
+
+Interpreter::Flow Interpreter::execWhile(const WhileStmt& loop, const EnvPtr& env) {
+    if (loop.doWhile) {
+        while (true) {
+            Flow flow = execScoped(loop.body, env);
+            if (flow == Flow::Break) break;
+            if (flow == Flow::Return) return flow;
+            if (!eval(*loop.condition, env).truthy()) break;
+        }
+        return Flow::Normal;
+    }
+    while (eval(*loop.condition, env).truthy()) {
+        Flow flow = execScoped(loop.body, env);
+        if (flow == Flow::Break) break;
+        if (flow == Flow::Return) return flow;
+    }
+    return Flow::Normal;
+}
+
+// for (init; condition; step) body
+Interpreter::Flow Interpreter::execCFor(const CForStmt& loop, const EnvPtr& env) {
+    EnvPtr scope = loop.init.empty() ? env : newEnvironment(env);
+    for (const auto& init : loop.init) exec(*init, scope);
+    while (true) {
+        if (loop.condition && !eval(*loop.condition, scope).truthy()) break;
+        Flow flow = execScoped(loop.body, scope);
+        if (flow == Flow::Break) break;
+        if (flow == Flow::Return) return flow;
+        if (loop.copyPerIteration && scope != env) {
+            // Functions made in this iteration keep the variables as they are now.
+            auto next = newEnvironment(env);
+            for (const auto& entry : scope->locals()) {
+                next->define(entry.first, entry.second.value, entry.second.type, entry.second.constant);
+            }
+            scope = next;
+        }
+        for (const auto& step : loop.step) exec(*step, scope);
+    }
+    return Flow::Normal;
+}
+
+// Runs from the first case equal to the value (or `default`) to the end of
+// the switch, or until `break`.
+Interpreter::Flow Interpreter::execSwitch(const SwitchStmt& stmt, const EnvPtr& env) {
+    Value subject = eval(*stmt.subject, env);
+    const SwitchCase* chosen = nullptr;
+    const SwitchCase* fallback = nullptr;
+    for (const auto& entry : stmt.cases) {
+        if (entry.values.empty()) {
+            fallback = &entry;
+            continue;
+        }
+        for (const auto& value : entry.values) {
+            if (valuesEqual(subject, eval(*value, env))) {
+                chosen = &entry;
+                break;
+            }
+        }
+        if (chosen != nullptr) break;
+    }
+    if (chosen == nullptr) chosen = fallback;
+    if (chosen == nullptr) return Flow::Normal;
+
+    EnvPtr scope = stmt.body.declaresNames ? newEnvironment(env) : env;
+    hoistFunctions(stmt.body, scope);
+    for (size_t i = chosen->start; i < stmt.body.statements.size(); ++i) {
+        Flow flow = exec(*stmt.body.statements[i], scope);
+        if (flow == Flow::Break) return Flow::Normal;
+        if (flow != Flow::Normal) return flow;
+    }
+    return Flow::Normal;
+}
+
+Interpreter::Flow Interpreter::execImport(const ImportStmt& stmt, const EnvPtr& env) {
+    if (!stmt.from) {
+        for (const auto& item : stmt.names) defineName(env, item.binding, importModule(item.name));
+        return Flow::Normal;
+    }
+    Value module = importModule(stmt.fromPath);
+    const MapObj& exports = module.asMap();
+    if (stmt.all) {
+        for (const auto& entry : exports.entries) defineName(env, entry.first.asString(), entry.second);
+        return Flow::Normal;
+    }
+    for (const auto& item : stmt.names) {
+        const Value* value = exports.find(Value::fromString(item.name));
+        if (value == nullptr) {
+            std::string names;
+            for (const auto& entry : exports.entries) names += (names.empty() ? "" : ", ") + entry.first.asString();
+            throw RuntimeError("\"" + stmt.fromPath + "\" has no '" + item.name + "'" +
+                               (names.empty() ? " (it exports nothing)" : " (it has: " + names + ")"));
+        }
+        defineName(env, item.binding, *value);
+    }
+    return Flow::Normal;
+}
+
+// enum Color { Red, Green = 5, Blue } defines the constant map
+// Color = {Red: 0, Green: 5, Blue: 6}.
+Interpreter::Flow Interpreter::execEnum(const EnumStmt& stmt, const EnvPtr& env) {
+    auto members = newMap();
+    int64_t next = 0;
+    for (const auto& member : stmt.members) {
+        Value value;
+        if (member.value) {
+            value = eval(*member.value, env);
+            int64_t number = 0;
+            if (value.isInt() && toInt64(value, number) && number < std::numeric_limits<int64_t>::max()) next = number + 1;
+        } else {
+            if (next == std::numeric_limits<int64_t>::max()) {
+                throw RuntimeError("enum " + stmt.name + ": the value of '" + member.name + "' is too large",
+                                   member.line, member.column);
+            }
+            value = Value::fromInt(next++);
+        }
+        members->set(Value::fromString(member.name), std::move(value));
+    }
+    members->frozenAs = "enum " + stmt.name;
+    defineName(env, stmt.name, Value::fromMap(members), TypeSpec(), true);
+    return Flow::Normal;
 }
 
 Interpreter::Flow Interpreter::execTry(const TryStmt& stmt, const EnvPtr& env) {
@@ -959,8 +1148,61 @@ Value Interpreter::evalExpr(const Expr& expr, const EnvPtr& env) {
 
         case ExprKind::FString:
             return evalFString(expr.as<FStringExpr>(), env);
+
+        case ExprKind::IncDec:
+            return evalIncDec(expr.as<IncDecExpr>(), env);
     }
     return Value();
+}
+
+// x++ and friends: like x += 1, but an expression whose value is the old
+// value (x++) or the new one (++x).
+Value Interpreter::evalIncDec(const IncDecExpr& expr, const EnvPtr& env) {
+    const char* symbol = expr.increment ? "++" : "--";
+    auto step = [&](const Value& current) {
+        if (!current.isNumber() && !current.isChar()) {
+            throw RuntimeError(std::string("can't use '") + symbol + "' on " + aTypeName(current) +
+                               " value (it needs a number or a char)");
+        }
+        return binaryOp(expr.increment ? TokenType::Plus : TokenType::Minus, current, Value::fromInt(1));
+    };
+
+    const Expr& target = *expr.target;
+    switch (target.kind) {
+        case ExprKind::Variable: {
+            const std::string& name = target.as<VariableExpr>().name;
+            Variable* variable = env->find(name);
+            if (variable == nullptr) {
+                throw RuntimeError("undefined variable '" + name + "'" + suggestName(name, *env), target.line,
+                                   target.column);
+            }
+            if (variable->constant) throw RuntimeError("can't change '" + name + "': it's a constant");
+            Value old = variable->value;
+            variable->value = coerceVariable(name, variable->type, step(old));
+            return expr.prefix ? variable->value : old;
+        }
+        case ExprKind::Index: {
+            const auto& index = target.as<IndexExpr>();
+            Value object = eval(*index.object, env);
+            Value key = eval(*index.index, env);
+            Value old = indexGet(object, key);
+            indexSet(object, key, step(old));
+            return expr.prefix ? indexGet(object, key) : old;
+        }
+        case ExprKind::Member: {
+            const auto& member = target.as<MemberExpr>();
+            Value object = eval(*member.object, env);
+            if (!object.isMap()) {
+                throw RuntimeError("can't change field '" + member.name + "' of " + aTypeName(object) + " value");
+            }
+            Value key = Value::fromString(member.name);
+            Value old = indexGet(object, key);
+            setElement(object.asMap(), key, step(old));
+            return expr.prefix ? indexGet(object, key) : old;
+        }
+        default:
+            throw RuntimeError(std::string("'") + symbol + "' needs a variable, element or field");
+    }
 }
 
 Value Interpreter::evalVariable(const VariableExpr& expr, const EnvPtr& env) {
@@ -998,7 +1240,16 @@ Value Interpreter::evalMember(const MemberExpr& expr, const EnvPtr& env) {
                            expr.line, expr.column);
     }
     const Value* field = object.asMap().find(Value::fromString(expr.name));
-    if (field == nullptr) throw RuntimeError("map has no key \"" + expr.name + "\"", expr.line, expr.column);
+    if (field == nullptr) {
+        const MapObj& map = object.asMap();
+        if (map.structInfo) {
+            throw RuntimeError(map.structInfo->name + " has no field '" + expr.name + "'", expr.line, expr.column);
+        }
+        if (!map.frozenAs.empty()) {
+            throw RuntimeError(map.frozenAs + " has no member '" + expr.name + "'", expr.line, expr.column);
+        }
+        throw RuntimeError("map has no key \"" + expr.name + "\"", expr.line, expr.column);
+    }
     return *field;
 }
 
@@ -1054,6 +1305,125 @@ Value Interpreter::makeFunction(const FunctionExpr& expr, const EnvPtr& env, con
     return Value::fromFunction(track(std::make_shared<FunctionObj>(name, &expr, env, currentSource_)));
 }
 
+Value Interpreter::makeStruct(const StructStmt& stmt, const EnvPtr& env) {
+    auto info = std::make_shared<StructInfo>();
+    info->name = stmt.name;
+    for (const auto& field : stmt.fields) info->fields.emplace_back(field.name, field.type);
+    return Value::fromFunction(track(std::make_shared<StructType>(info, &stmt, env, currentSource_)));
+}
+
+// Point(1, 2): the arguments fill the fields in order; fields left out get
+// their default value, or their type's zero value.
+Value Interpreter::constructStruct(StructType& type, std::vector<Value> args, int line, int column) {
+    const StructStmt& declaration = *type.declaration;
+    const std::string& name = declaration.name;
+    if (args.size() > declaration.fields.size()) {
+        std::string fields;
+        for (const auto& field : declaration.fields) fields += (fields.empty() ? "" : ", ") + field.name;
+        throw RuntimeError(name + "() takes at most " + std::to_string(declaration.fields.size()) + " argument" +
+                               (declaration.fields.size() == 1 ? "" : "s") + (fields.empty() ? "" : " (" + fields + ")") +
+                               ", but got " + std::to_string(args.size()),
+                           line, column);
+    }
+    if (callDepth_ >= maxCallDepth_) {
+        throw RuntimeError("maximum recursion depth (" + std::to_string(maxCallDepth_) + ") exceeded while making a " +
+                               name,
+                           line, column);
+    }
+    checkStack();
+
+    auto object = newMap();
+    object->structInfo = type.info;
+    EnvPtr scope;  // where default values are evaluated, made when first needed
+    FrameGuard frame(*this, type.source, nullptr);
+    for (size_t i = 0; i < declaration.fields.size(); ++i) {
+        const StructField& field = declaration.fields[i];
+        Value value;
+        if (i < args.size()) {
+            value = std::move(args[i]);
+        } else if (field.defaultValue) {
+            if (!scope) scope = newEnvironment(type.closure);
+            value = eval(*field.defaultValue, scope);
+        } else {
+            ErrorSite site(*this, field.line, field.column);
+            value = zeroValue(field.type, type.closure);
+        }
+        Value converted;
+        CoerceFailure failure;
+        if (!coerceToType(value, field.type, converted, failure)) {
+            std::string message = withHint(name + "(): field '" + field.name + "' is " + field.type.name() +
+                                               ", so it can't hold " + failure.what,
+                                           failure);
+            if (i < args.size()) {
+                RuntimeError error(message, line, column);  // a bad argument: report it at the call
+                error.source = frame.callerSource();
+                throw error;
+            }
+            throw RuntimeError(message, field.line, field.column);
+        }
+        object->set(Value::fromString(field.name), std::move(converted));
+    }
+    return Value::fromMap(object);
+}
+
+void Interpreter::setElement(MapObj& map, const Value& key, Value value) {
+    if (!map.frozenAs.empty()) throw RuntimeError("the members of " + map.frozenAs + " can't be changed");
+    if (map.structInfo) {
+        const StructInfo& info = *map.structInfo;
+        const TypeSpec* type = key.isString() ? info.fieldType(key.asString()) : nullptr;
+        if (type == nullptr) {
+            std::string fields;
+            for (const auto& field : info.fields) fields += (fields.empty() ? "" : ", ") + field.first;
+            throw RuntimeError(info.name + " has no field " + (key.isString() ? "'" + key.asString() + "'" : toRepr(key)) +
+                               " (its fields are: " + (fields.empty() ? "none" : fields) + ")");
+        }
+        if (!type->isAny()) {
+            Value converted;
+            CoerceFailure failure;
+            if (!coerceToType(value, *type, converted, failure)) {
+                throw RuntimeError(withHint("field '" + key.asString() + "' of " + info.name + " is " + type->name() +
+                                                ", so it can't hold " + failure.what,
+                                            failure));
+            }
+            value = std::move(converted);
+        }
+    }
+    map.set(key, std::move(value));
+}
+
+int Interpreter::runMain() {
+    Variable* main = globals_->findLocal("main");
+    if (main == nullptr || !main->value.isFunction() || main->value.asFunction().kind != Callable::Kind::User) return 0;
+    Value function = main->value;
+    const auto& declaration = *static_cast<FunctionObj&>(function.asFunction()).declaration;
+
+    std::vector<Value> args;
+    Variable* programArgs = globals_->find("args");
+    Value list = programArgs != nullptr && programArgs->value.isList() ? programArgs->value : Value::fromList(newList());
+    if (declaration.params.size() == 1) {
+        args.push_back(list);
+    } else if (declaration.params.size() >= 2) {
+        args.push_back(Value::fromInt(static_cast<int64_t>(list.asList().items.size())));
+        args.push_back(list);
+    }
+
+    const SourceFile* saved = currentSource_;
+    clearErrorSite();
+    Value result;
+    try {
+        ErrorSite site(*this, declaration.line, declaration.column);
+        result = call(function, std::move(args), declaration.line, declaration.column);
+    } catch (RuntimeError& error) {
+        applyErrorSite(error);
+        currentSource_ = saved;
+        throw;
+    }
+    currentSource_ = saved;
+    int64_t code = 0;
+    if (result.isInt() && toInt64(result, code)) return static_cast<int>(code);
+    return 0;
+}
+
 Value Interpreter::call(const Value& callee, std::vector<Value> args, int line, int column) {
     if (!callee.isFunction()) {
         throw RuntimeError(aTypeName(callee) + " value can't be called like a function", line, column);
@@ -1070,6 +1440,10 @@ Value Interpreter::call(const Value& callee, std::vector<Value> args, int line, 
         }
         // Errors from the builtin are reported at the call (the enclosing ErrorSite).
         return native.fn(*this, args);
+    }
+
+    if (callable.kind == Callable::Kind::Struct) {
+        return constructStruct(static_cast<StructType&>(callable), std::move(args), line, column);
     }
 
     auto& function = static_cast<FunctionObj&>(callable);
@@ -1266,7 +1640,7 @@ void Interpreter::indexSet(const Value& object, const Value& index, Value value)
             return;
         }
         case Value::Type::Map:
-            object.asMap().set(index, std::move(value));
+            setElement(object.asMap(), index, std::move(value));
             return;
         case Value::Type::String:
             throw RuntimeError("strings can't be changed in place; build a new string instead");

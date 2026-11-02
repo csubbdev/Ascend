@@ -37,16 +37,25 @@ for name, score in scores {
   `list`, `map`, `func`, `void` and nullable types like `string?`. Typed
   variables, parameters and return values are checked, and integer overflow is
   an error instead of a silent wrap.
+- **C-style code works too**: `for (i32 i = 0; i < n; i++)`, `i++` / `--i`,
+  `switch` / `case` / `default` with fall-through, `do { } while (...)`,
+  bodies without braces (`if (x < 0) x = -x`), casts like `(f64) total / n`,
+  `printf("%-8s %5.2f\n", name, price)` and a `main()` function that runs
+  automatically
+- **Structs** with typed fields (`struct Point { f64 x; f64 y = 0 }`) and
+  **enums** (`enum Color { Red, Green, Blue }`)
 - Constants, `match`, `if` / `else if`, `while`, `for ... in` over ranges,
-  lists, strings and maps, `break` / `continue`
+  lists, strings and maps, `break` / `continue`, `auto` type inference
 - Functions with default parameters, recursion, closures and anonymous functions
 - f-strings with format specs: `f"{price:>8.2f}"`
 - Hex, binary and octal literals, type suffixes (`255u8`) and bitwise operators
 - Unicode strings and a `char` type
-- Modules with `import("file")`, and **`apkg`, a package manager** like pip:
-  `apkg install colors`, then `import("colors")`
+- Modules with `import geometry` and `from geometry import area`, and
+  **`apkg`, a package manager** like pip: `apkg install colors`, then
+  `import colors`
 - `try` / `catch` / `throw` error handling
-- 100+ builtins for strings, lists, maps, math, files, JSON and the system
+- 100+ builtins for strings, lists, maps, math, files and folders, JSON,
+  regular expressions and the system
 - Clear error messages that point at the problem, many caught before running:
 
   ```
@@ -70,7 +79,8 @@ Install a package and use it:
 
 ```sh
 ./build/apkg install colors
-./build/ascend -e 'print(import("colors").green("Hello!"))'
+./build/ascend -e 'import colors
+print(colors.green("Hello!"))'
 ```
 
 ## Documentation

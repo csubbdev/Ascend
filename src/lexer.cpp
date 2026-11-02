@@ -210,10 +210,18 @@ void Lexer::scanToken() {
         case '?': add(TokenType::Question); return;
         case '~': add(TokenType::Tilde); return;
         case ':': add(match('=') ? TokenType::Declare : TokenType::Colon); return;
-        case '+': add(match('=') ? TokenType::PlusEqual : TokenType::Plus); return;
+        case '+':
+            if (match('+')) {
+                add(TokenType::PlusPlus);
+            } else {
+                add(match('=') ? TokenType::PlusEqual : TokenType::Plus);
+            }
+            return;
         case '-':
             if (match('>')) {
                 add(TokenType::Arrow);
+            } else if (match('-')) {
+                add(TokenType::MinusMinus);
             } else {
                 add(match('=') ? TokenType::MinusEqual : TokenType::Minus);
             }

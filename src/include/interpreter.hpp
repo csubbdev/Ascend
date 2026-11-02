@@ -52,6 +52,15 @@ public:
     // map. Relative paths are relative to the file that is running.
     Value importModule(const std::string& path);
 
+    // Calls the program's main() function, C style: with no arguments, with
+    // the list `args`, or with (count, args), depending on its parameters.
+    // Returns its result as an exit code (0 unless it returns an integer).
+    int runMain();
+
+    // Stores `value` in a map element, checking the field types of structs
+    // and refusing changes to enums.
+    void setElement(MapObj& map, const Value& key, Value value);
+
     // Operations shared with the standard library.
     Value binaryOp(TokenType op, const Value& left, const Value& right);
     Value indexGet(const Value& object, const Value& index);
@@ -100,6 +109,11 @@ private:
     Flow execDeclare(const DeclareStmt& stmt, const EnvPtr& env);
     Flow execAssign(const AssignStmt& stmt, const EnvPtr& env);
     Flow execFor(const ForStmt& stmt, const EnvPtr& env);
+    Flow execCFor(const CForStmt& stmt, const EnvPtr& env);
+    Flow execWhile(const WhileStmt& stmt, const EnvPtr& env);
+    Flow execSwitch(const SwitchStmt& stmt, const EnvPtr& env);
+    Flow execImport(const ImportStmt& stmt, const EnvPtr& env);
+    Flow execEnum(const EnumStmt& stmt, const EnvPtr& env);
     Flow execTry(const TryStmt& stmt, const EnvPtr& env);
     Flow execMatch(const MatchStmt& stmt, const EnvPtr& env);
     Flow execReturn(const ReturnStmt& stmt, const EnvPtr& env);
@@ -112,10 +126,15 @@ private:
     Value evalUnary(const UnaryExpr& expr, const EnvPtr& env);
     Value evalMember(const MemberExpr& expr, const EnvPtr& env);
     Value evalFString(const FStringExpr& expr, const EnvPtr& env);
+    Value evalIncDec(const IncDecExpr& expr, const EnvPtr& env);
+    Value makeStruct(const StructStmt& stmt, const EnvPtr& env);
+    Value constructStruct(StructType& type, std::vector<Value> args, int line, int column);
     Value makeFunction(const FunctionExpr& expr, const EnvPtr& env, const std::string& name);
     void indexSet(const Value& object, const Value& index, Value value);
 
-    Value zeroValue(const TypeSpec& type);
+    Value zeroValue(const TypeSpec& type, const EnvPtr& env);
+    void defineName(const EnvPtr& env, const std::string& name, Value value, const TypeSpec& type = TypeSpec(),
+                    bool constant = false);
     Value coerceVariable(const std::string& name, const TypeSpec& type, Value value);
     void noteErrorSite(int line, int column);
     void applyErrorSite(RuntimeError& error);

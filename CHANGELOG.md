@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.5.0
+
+### New
+
+- **C-style syntax**:
+  - `for (init; condition; step)` loops, with several comma-separated
+    statements in the first and last parts (`for (i32 i = 0, j = n; i < j;
+    i++, j--)`), empty parts (`for (;;)`), and `for { }` to loop until
+    `break`. Closures created in the body see that iteration's variables.
+  - `++` and `--`, before or after a variable, element or field.
+  - `switch` / `case` / `default` with C's fall-through and `break`; a case
+    can list several values (`case 1, 2:`).
+  - `do { ... } while (condition)`.
+  - Bodies without braces for `if`, `else`, `while`, `for` and `do`:
+    `if (x < 0) x = -x`, on the same line or the next.
+  - Casts: `(f64) total / count`, `(i32) 3.9`, `(char) 65`.
+  - Several declarations in one statement: `i32 a = 1, b = 2`.
+  - `double`, `long` and `short` as names for `f64`, `i64` and `i16`.
+  - `auto x = value` fixes the variable's type to its first value's type.
+  - A top-level `main()` runs automatically after the rest of the program
+    (unless the program calls it), with `args` or `(argc, argv)` if it takes
+    them; an integer result is the exit code.
+  - `printf` and `sprintf` with C format strings.
+- Typed loop variables, and `:` instead of `in`: `for (string s : names)`.
+- **Import statements**: `import geometry`, `import lib.shapes as shapes`,
+  `import "path/file.asc" as name`, `from geometry import area, Point as P`
+  and `from geometry import *`. The `import(...)` function still works.
+- **Structs**: `struct Point { f64 x; f64 y = 0 }` declares a type with typed
+  fields and a constructor, `Point(1, 2)`. Struct names work as types in
+  declarations, parameters and return values; fields keep their types, and
+  unknown fields are errors. Struct values print as `Point{x: 1.0, y: 2.0}`.
+- **Enums**: `enum Color { Red, Green = 5, Blue }` makes a constant map of
+  names to ints.
+- Regular expressions: `regex_match`, `regex_search`, `regex_find_all`,
+  `regex_replace`, `regex_split`.
+- Folders: `is_dir`, `make_dir`, `list_dir`.
+
+### Fixed
+
+- Floats with few significant digits printed in exponent form: `20.0`
+  printed as `2e+01`.
+
 ## 0.4.0
 
 ### New

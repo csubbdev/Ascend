@@ -12,7 +12,7 @@ apkg uninstall colors      # remove it again
 Programs use installed packages with `import`:
 
 ```
-colors := import("colors")
+import colors
 print(colors.green("it works!"))
 ```
 
@@ -94,7 +94,7 @@ somewhere else.
 
 ## How import finds packages
 
-`import("name")` first looks for a file `name.asc` next to the importing file,
+`import name` first looks for a file `name.asc` next to the importing file,
 as always. If there isn't one, it looks for an installed package called
 `name`:
 
@@ -103,7 +103,8 @@ as always. If there isn't one, it looks for an installed package called
 2. in your own packages (`~/.ascend/packages/name`).
 
 It runs the package's main file (`main` in its `ascend.json`). To import a
-different file from a package, add its path: `import("strings/strings")`.
+different file from a package, add its path: `import strings.strings` (or
+`import("strings/strings")`).
 
 A package that depends on another one imports it the same way, so packages
 can be used together without knowing where they're installed.
@@ -131,7 +132,7 @@ A package is a folder with an `ascend.json`:
 | `name` | Required. Lowercase letters, digits, `-` and `_`. This is the name used to `import` it. |
 | `version` | Required. Use `major.minor.patch` numbers. |
 | `description` | A one-line summary, shown by `apkg show` and `apkg search`. |
-| `main` | The file `import("name")` runs. Defaults to `main.asc`. |
+| `main` | The file `import name` runs. Defaults to `main.asc`. |
 | `dependencies` | Other packages it needs: `"*"` for any version from the registry, a version number like `"1.2.0"`, or any source `apkg install` accepts, like `"github:user/repo@v1.0"` or `"file:../other-folder"`. |
 
 Everything at the top level of the main file that doesn't start with `_`

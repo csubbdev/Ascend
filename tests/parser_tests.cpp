@@ -119,6 +119,12 @@ std::string dump(const Expr* expr) {
             if (!function.returnType.isAny()) out += " -> " + function.returnType.name();
             return out + ")";
         }
+        case ExprKind::IncDec: {
+            const auto& incdec = expr->as<IncDecExpr>();
+            std::string symbol = incdec.increment ? "++" : "--";
+            return incdec.prefix ? "(" + symbol + dump(incdec.target.get()) + ")"
+                                 : "(" + dump(incdec.target.get()) + symbol + ")";
+        }
         case ExprKind::FString: {
             std::string out = "(f";
             for (const auto& part : expr->as<FStringExpr>().parts) {
@@ -335,7 +341,8 @@ TEST(parser_typed_declarations) {
     CHECK(onlyStatement(constant).as<DeclareStmt>().constant);
     CHECK(parse("const LIMIT := 3").errors.empty());
 
-    CHECK(firstError("int32 x = 1").find("unknown type 'int32'") == 0);
+    // Other names may be structs, so unknown types are reported by the semantic analyzer.
+    CHECK(parse("int32 x = 1").errors.empty());
     CHECK_EQ(firstError("void x"), std::string("'void' can only be used as a return type"));
     CHECK_EQ(firstError("i32 x := 5"), std::string("use '=' in a typed declaration, like 'i32 x = ...'"));
     CHECK_EQ(firstError("const X"), std::string("a constant needs a value: 'const X = ...'"));
@@ -403,4 +410,151 @@ TEST(parser_f_strings) {
     CHECK_EQ(expr("f\"{a}{b}\""), std::string("(f a b)"));
     CHECK(firstError("f\"{a ? b : c}\"").find("put a conditional expression in parentheses") != std::string::npos);
     CHECK(parse("f\"{(a ? b : c)}\"").errors.empty());
+}
+
+TEST(parser_increment_and_decrement) {
+    CHECK_EQ(expr("i++"), "(i++)");
+    CHECK_EQ(expr("--i"), "(--i)");
+    CHECK_EQ(expr("items[i++]"), "(index items (i++))");
+    CHECK_EQ(expr("p.count--"), "((. p count)--)");
+    CHECK_EQ(expr("x + ++y"), "(+ x (++y))");
+    CHECK_EQ(expr("a - -b"), "(- a (- b))");
+    CHECK_EQ(firstError("5++"), "expected a newline or ';' after the statement, found '++'");
+    CHECK_EQ(firstError("++f()"), "'++' needs a variable, element or field to change");
+}
+
+TEST(parser_casts) {
+    CHECK_EQ(expr("(f64) total / count"), "(/ (call f64 total) count)");
+    CHECK_EQ(expr("(i32) -x"), "(call i32 (- x))");
+    CHECK_EQ(expr("(double) 1"), "(call double 1)");
+    CHECK_EQ(expr("(x) + 1"), "(+ x 1)");        // not a type: just parentheses
+    CHECK_EQ(expr("(list) + 1"), "(+ list 1)");  // only number, bool, char and string casts
+}
+
+TEST(parser_c_style_for_loops) {
+    Parsed classic = parse("for (i32 i = 0; i < 10; i++) { print(i) }");
+    CHECK(classic.errors.empty());
+    const auto& loop = onlyStatement(classic).as<CForStmt>();
+    CHECK_EQ(loop.init.size(), size_t(1));
+    CHECK(loop.init[0]->kind == StmtKind::Declare);
+    CHECK_EQ(dump(loop.condition.get()), "(< i 10)");
+    CHECK_EQ(loop.step.size(), size_t(1));
+    CHECK(!loop.copyPerIteration);
+
+    Parsed several = parse("for (i32 a = 0, b = 9; a < b; a++, b--) {}");
+    CHECK(several.errors.empty());
+    const auto& pair = onlyStatement(several).as<CForStmt>();
+    CHECK(pair.init[0]->kind == StmtKind::Group);
+    CHECK_EQ(pair.step.size(), size_t(2));
+
+    CHECK(onlyStatement(parse("for (;;) { break }")).as<CForStmt>().condition == nullptr);
+    CHECK(onlyStatement(parse("for { break }")).kind == StmtKind::CFor);
+    CHECK(onlyStatement(parse("for i := 0; i < 3; i++ { }")).kind == StmtKind::CFor);
+    CHECK(onlyStatement(parse("for (i := 0; i < 3; i++) fns.push(func() { return i })")).as<CForStmt>().copyPerIteration);
+
+    Parsed typed = parse("for (string name : names) print(name)");
+    CHECK(typed.errors.empty());
+    const auto& each = onlyStatement(typed).as<ForStmt>();
+    CHECK_EQ(each.firstType.name(), "string");
+    CHECK(onlyStatement(parse("for (i, x in items) {}")).kind == StmtKind::For);
+    CHECK(onlyStatement(parse("for x in (a) {}")).kind == StmtKind::For);
+    CHECK_EQ(firstError("for (i = 0; i < 3) {}"), "expected ';' after the loop condition, found ')'");
+}
+
+TEST(parser_bodies_without_braces) {
+    Parsed parsed = parse("if (x > 0) print(x)\nelse if (x < 0)\n    print(-x)\nelse print(0)");
+    CHECK(parsed.errors.empty());
+    const auto& branch = onlyStatement(parsed).as<IfStmt>();
+    CHECK_EQ(branch.thenBody.statements.size(), size_t(1));
+    CHECK(branch.elseBranch->kind == StmtKind::If);
+
+    CHECK(parse("if (a) b() else c()").errors.empty());
+    CHECK(parse("while (i < 10) i++").errors.empty());
+    CHECK(parse("while (busy());").errors.empty());
+    CHECK(parse("for (x in xs) total += x").errors.empty());
+    CHECK(parse("if (done) ++count").errors.empty());
+    // When something follows the ')', the parentheses are part of the condition.
+    Parsed longer = parse("if (a + b) * 2 > 3 { }");
+    CHECK(longer.errors.empty());
+    CHECK_EQ(dump(onlyStatement(longer).as<IfStmt>().condition.get()), "(> (* (+ a b) 2) 3)");
+    CHECK_EQ(firstError("if (x)\n"), "expected '{' to start the 'if' body, found end of input");
+}
+
+TEST(parser_do_while_and_switch) {
+    Parsed loop = parse("do {\n  i++\n} while (i < 3)");
+    CHECK(loop.errors.empty());
+    CHECK(onlyStatement(loop).as<WhileStmt>().doWhile);
+    CHECK(parse("do x++; while (x < 3)").errors.empty());
+    CHECK_EQ(firstError("do { }"), "expected 'while' and a condition after the 'do' body, found end of input");
+
+    Parsed choice = parse("switch (x) {\ncase 1, 2:\n  a()\n  break\ncase 3:\ndefault:\n  b()\n}");
+    CHECK(choice.errors.empty());
+    const auto& cases = onlyStatement(choice).as<SwitchStmt>().cases;
+    CHECK_EQ(cases.size(), size_t(3));
+    CHECK_EQ(cases[0].values.size(), size_t(2));
+    CHECK_EQ(cases[1].start, size_t(2));
+    CHECK(cases[2].values.empty());
+    CHECK_EQ(cases[2].start, size_t(2));
+    CHECK(parse("switch x { case \"a\": print(1); break }").errors.empty());
+    CHECK_EQ(firstError("switch x { print(1) }"), "expected 'case' or 'default' in the switch, found identifier 'print'");
+    CHECK_EQ(firstError("switch x { default: a()\n default: b() }"), "a switch can only have one 'default'");
+    CHECK_EQ(firstError("case 1: x()"), "'case' can only be used inside a switch");
+    // These words are still ordinary names elsewhere.
+    CHECK(parse("switch := 1\ndo := 2\ncase := 3\ndefault := 4\nprint(switch, do, case, default)").errors.empty());
+}
+
+TEST(parser_import_statements) {
+    Parsed simple = parse("import geometry, lib.shapes as shapes, \"../x.asc\"");
+    CHECK(simple.errors.empty());
+    const auto& names = onlyStatement(simple).as<ImportStmt>().names;
+    CHECK_EQ(names.size(), size_t(3));
+    CHECK_EQ(names[0].name, "geometry");
+    CHECK_EQ(names[0].binding, "geometry");
+    CHECK_EQ(names[1].name, "lib/shapes");
+    CHECK_EQ(names[1].binding, "shapes");
+    CHECK_EQ(names[2].name, "../x.asc");
+    CHECK_EQ(names[2].binding, "x");
+
+    Parsed from = parse("from lib.shapes import area, Point as P");
+    CHECK(from.errors.empty());
+    const auto& fromImport = onlyStatement(from).as<ImportStmt>();
+    CHECK(fromImport.from);
+    CHECK_EQ(fromImport.fromPath, "lib/shapes");
+    CHECK_EQ(fromImport.names[1].binding, "P");
+    CHECK(onlyStatement(parse("from \"./x\" import *")).as<ImportStmt>().all);
+    CHECK(parse("from x import (a, b,)").errors.empty());
+
+    CHECK(onlyStatement(parse("m := import(\"x\")")).kind == StmtKind::Declare);  // the function still works
+    CHECK(parse("from := 1\nimport := 2").errors.empty());
+    CHECK(firstError("import \"my-lib\"").find("give the module a name with 'as'") != std::string::npos);
+    CHECK_EQ(firstError("from x import"), "expected a name to import, found end of input");
+}
+
+TEST(parser_structs_enums_and_auto) {
+    Parsed point = parse("struct Point {\n  f64 x, y\n  string label = \"p\"\n  any extra\n}");
+    CHECK(point.errors.empty());
+    const auto& fields = onlyStatement(point).as<StructStmt>().fields;
+    CHECK_EQ(fields.size(), size_t(4));
+    CHECK_EQ(fields[1].name, "y");
+    CHECK_EQ(fields[1].type.name(), "f64");
+    CHECK(fields[2].defaultValue != nullptr);
+    CHECK(parse("struct P { i32 a; i32 b };").errors.empty());
+    CHECK(firstError("struct P { f64 area() { } }").find("a struct can't contain functions") == 0);
+
+    Parsed typed = parse("Point p = Point(1, 2)");
+    CHECK(typed.errors.empty());
+    CHECK_EQ(onlyStatement(typed).as<DeclareStmt>().type.name(), "Point");
+    CHECK(onlyStatement(parse("Point? find(list items) { return null }")).kind == StmtKind::Function);
+    CHECK(onlyStatement(parse("ready ? go() : stop()")).kind == StmtKind::Expression);
+
+    Parsed colors = parse("enum Color {\n  Red,\n  Green = 5\n  Blue\n}");
+    CHECK(colors.errors.empty());
+    CHECK_EQ(onlyStatement(colors).as<EnumStmt>().members.size(), size_t(3));
+
+    Parsed inferred = parse("auto n = 5");
+    CHECK(inferred.errors.empty());
+    CHECK(onlyStatement(inferred).as<DeclareStmt>().inferType);
+    CHECK_EQ(firstError("auto n"), "'auto n' needs a value to take its type from, like 'auto n = 0'");
+    CHECK_EQ(firstError("i32 f(auto x) { }"), "'auto' can only be used to declare a variable with a value");
+    CHECK(onlyStatement(parse("i32 a = 1, b = 2")).kind == StmtKind::Group);
 }

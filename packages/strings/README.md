@@ -7,7 +7,7 @@ apkg install strings
 ```
 
 ```
-strings := import("strings")
+import strings
 
 print(strings.snake_case("parseHTTPResponse"))   // parse_http_response
 print(strings.title("the quick brown fox"))      // The Quick Brown Fox

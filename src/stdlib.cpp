@@ -12,9 +12,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <random>
+#include <regex>
 #include <string>
 #include <thread>
 
@@ -243,6 +245,202 @@ std::string padText(const Args& args, const char* fn, bool left) {
     return left ? padding + text : text + padding;
 }
 
+// Structs always have all their fields, and enums never change.
+void checkResizable(const MapObj& map, const char* fn) {
+    if (map.structInfo) throw RuntimeError(std::string(fn) + "() can't remove fields from a " + map.structInfo->name);
+    if (!map.frozenAs.empty()) throw RuntimeError(std::string(fn) + "(): the members of " + map.frozenAs + " can't be changed");
+}
+
+// printf("%-10s %5.2f\n", name, price): C format strings.
+//   %d %i %u  integer        %f %e %g  float (%F %E %G)     %x %X %o %b  hex, octal, binary
+//   %c  char (or a character code)     %s  any value as text  %%  a percent sign
+// with C flags (- + space 0 #), width and precision, which may be * (taken
+// from the arguments). Length modifiers like l and ll are accepted and ignored.
+std::string cFormat(const char* fn, const Args& args) {
+    const std::string& format = stringArg(args, 0, fn);
+    const std::string name = fn;
+    size_t next = 1;
+    auto nextArg = [&](const std::string& conversion) -> const Value& {
+        if (next >= args.size()) {
+            throw RuntimeError(name + "(): the format has more conversions than values (no value for " + conversion + ")");
+        }
+        return args[next++];
+    };
+
+    std::string out;
+    for (size_t i = 0; i < format.size(); ++i) {
+        if (format[i] != '%') {
+            out += format[i];
+            continue;
+        }
+        size_t start = i++;
+        if (i < format.size() && format[i] == '%') {
+            out += '%';
+            continue;
+        }
+        bool left = false, plus = false, space = false, zero = false, alternate = false;
+        for (; i < format.size(); ++i) {
+            char flag = format[i];
+            if (flag == '-') left = true;
+            else if (flag == '+') plus = true;
+            else if (flag == ' ') space = true;
+            else if (flag == '0') zero = true;
+            else if (flag == '#') alternate = true;
+            else break;
+        }
+        int64_t width = 0;
+        if (i < format.size() && format[i] == '*') {
+            const Value& value = nextArg("*");
+            if (!value.isInt() || !toInt64(value, width)) throw RuntimeError(name + "(): a * width needs an integer");
+            if (width < 0) {
+                left = true;
+                width = -width;
+            }
+            ++i;
+        } else {
+            while (i < format.size() && std::isdigit(static_cast<unsigned char>(format[i]))) {
+                width = width * 10 + (format[i++] - '0');
+                if (width > 10000) throw RuntimeError(name + "(): width is too large");
+            }
+        }
+        int64_t precision = -1;
+        if (i < format.size() && format[i] == '.') {
+            ++i;
+            precision = 0;
+            if (i < format.size() && format[i] == '*') {
+                const Value& value = nextArg("*");
+                if (!value.isInt() || !toInt64(value, precision)) throw RuntimeError(name + "(): a * precision needs an integer");
+                if (precision < 0) precision = -1;
+                ++i;
+            } else {
+                while (i < format.size() && std::isdigit(static_cast<unsigned char>(format[i]))) {
+                    precision = precision * 10 + (format[i++] - '0');
+                    if (precision > 100) throw RuntimeError(name + "(): precision is too large");
+                }
+            }
+        }
+        while (i < format.size() && std::string("hlLjzt").find(format[i]) != std::string::npos) ++i;
+        if (i >= format.size()) {
+            throw RuntimeError(name + "(): the format ends in the middle of '" + format.substr(start) +
+                               "' (write %% for a percent sign)");
+        }
+        const char conversion = format[i];
+        const std::string written = format.substr(start, i - start + 1);
+        const Value& value = nextArg(written);
+
+        std::string text;
+        bool numeric = true;
+        std::string prefix;
+        switch (conversion) {
+            case 'd':
+            case 'i':
+            case 'u':
+            case 'x':
+            case 'X':
+            case 'o':
+            case 'b': {
+                Value number = value;
+                if (value.isChar()) number = Value::fromInt(static_cast<int64_t>(value.asChar()));
+                if (value.isBool()) number = Value::fromInt(value.asBool() ? 1 : 0);
+                if (!number.isInt()) {
+                    throw RuntimeError(name + "(): " + written + " needs an integer, but got " +
+                                       (value.isFloat() ? toString(value) + " (use %f for floats, or int(...) to drop the "
+                                                                            "fraction)"
+                                                        : aTypeName(value)));
+                }
+                char type = conversion == 'i' || conversion == 'u' ? 'd' : conversion;
+                text = formatValue(number, std::string(plus ? "+" : space ? " " : "") + type);
+                if (alternate && !(number.isInt() && number.asInt() == 0)) {
+                    if (type == 'x') prefix = "0x";
+                    if (type == 'X') prefix = "0X";
+                    if (type == 'o') prefix = "0";
+                    if (type == 'b') prefix = "0b";
+                }
+                break;
+            }
+            case 'f':
+            case 'F':
+            case 'e':
+            case 'E':
+            case 'g':
+            case 'G': {
+                if (!value.isNumber()) {
+                    throw RuntimeError(name + "(): " + written + " needs a number, but got " + aTypeName(value));
+                }
+                std::string spec = std::string(plus ? "+" : space ? " " : "") + "." +
+                                   std::to_string(precision >= 0 ? precision : 6) + conversion;
+                text = formatValue(value, spec);
+                break;
+            }
+            case 'c':
+                numeric = false;
+                text = formatValue(value, "c");
+                break;
+            case 's':
+                numeric = false;
+                text = toString(value);
+                if (precision >= 0 && utf8Length(text) > static_cast<size_t>(precision)) {
+                    text = text.substr(0, utf8Offset(text, static_cast<size_t>(precision)));
+                }
+                break;
+            default:
+                throw RuntimeError(name + "(): unknown conversion '" + written +
+                                   "' (use %d, %f, %s, %c, %x, %o, %e, %g or %%)");
+        }
+
+        // Pad to the width: spaces on the left (or right with -), or zeros
+        // after the sign and prefix with 0.
+        std::string sign;
+        if (numeric && !text.empty() && (text[0] == '-' || text[0] == '+' || text[0] == ' ')) {
+            sign = text.substr(0, 1);
+            text = text.substr(1);
+        }
+        size_t length = sign.size() + prefix.size() + utf8Length(text);
+        size_t padding = static_cast<size_t>(width) > length ? static_cast<size_t>(width) - length : 0;
+        if (left) {
+            out += sign + prefix + text + std::string(padding, ' ');
+        } else if (zero && numeric) {
+            out += sign + prefix + std::string(padding, '0') + text;
+        } else {
+            out += std::string(padding, ' ') + sign + prefix + text;
+        }
+    }
+    if (next < args.size()) {
+        throw RuntimeError(name + "(): " + std::to_string(args.size() - 1) + " values were given, but the format only uses " +
+                           std::to_string(next - 1));
+    }
+    return out;
+}
+
+std::regex compileRegex(const Args& args, size_t i, const char* fn) {
+    const std::string& pattern = stringArg(args, i, fn);
+    try {
+        return std::regex(pattern, std::regex::ECMAScript);
+    } catch (const std::regex_error& error) {
+        throw RuntimeError(std::string(fn) + "(): invalid regular expression \"" + pattern + "\": " + error.what());
+    }
+}
+
+// Runs a regex operation, turning the library's errors (e.g. a pattern too
+// complex for the text) into Ascend errors.
+template <typename F>
+auto withRegex(const char* fn, F body) -> decltype(body()) {
+    try {
+        return body();
+    } catch (const std::regex_error& error) {
+        throw RuntimeError(std::string(fn) + "(): " + error.what());
+    }
+}
+
+// The whole match and each group, as strings (null for groups that didn't match).
+Value matchGroups(Interpreter& in, const std::smatch& match) {
+    std::vector<Value> groups;
+    for (size_t g = 0; g < match.size(); ++g) {
+        groups.push_back(match[g].matched ? Value::fromString(match[g].str()) : Value());
+    }
+    return Value::fromList(in.newList(std::move(groups)));
+}
+
 // ---------------------------------------------------------------------------
 // Builtins
 
@@ -266,7 +464,7 @@ void registerCore(Interpreter& interp) {
         return Value::fromString(line);
     });
 
-    interp.defineNative("type", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(args[0].typeName()); });
+    interp.defineNative("type", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(typeNameOf(args[0])); });
     interp.defineNative("str", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(toString(args[0])); });
     interp.defineNative("string", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(toString(args[0])); });
     interp.defineNative("repr", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(toRepr(args[0])); });
@@ -310,6 +508,15 @@ void registerCore(Interpreter& interp) {
         return in.importModule(stringArg(args, 0, "import"));
     });
 
+    interp.defineNative("printf", 1, -1, [](Interpreter& in, Args& args) {
+        in.out() << cFormat("printf", args);
+        return Value();
+    });
+
+    interp.defineNative("sprintf", 1, -1, [](Interpreter&, Args& args) {
+        return Value::fromString(cFormat("sprintf", args));
+    });
+
     interp.defineNative("format", 1, -1, [](Interpreter&, Args& args) {
         return Value::fromString(formatTemplate(stringArg(args, 0, "format"), args, 1));
     });
@@ -323,7 +530,7 @@ void registerConversions(Interpreter& interp) {
     static const IntConversion intConversions[] = {
         {"int", NumKind::Int}, {"i8", NumKind::I8},   {"i16", NumKind::I16}, {"i32", NumKind::I32},
         {"i64", NumKind::I64}, {"u8", NumKind::U8},   {"u16", NumKind::U16}, {"u32", NumKind::U32},
-        {"u64", NumKind::U64}, {"byte", NumKind::U8},
+        {"u64", NumKind::U64}, {"byte", NumKind::U8},  {"long", NumKind::I64}, {"short", NumKind::I16},
     };
     for (const auto& conversion : intConversions) {
         const char* name = conversion.name;
@@ -336,7 +543,7 @@ void registerConversions(Interpreter& interp) {
         NumKind kind;
     };
     static const FloatConversion floatConversions[] = {
-        {"float", NumKind::Float}, {"f32", NumKind::F32}, {"f64", NumKind::F64}};
+        {"float", NumKind::Float}, {"f32", NumKind::F32}, {"f64", NumKind::F64}, {"double", NumKind::F64}};
     for (const auto& conversion : floatConversions) {
         const char* name = conversion.name;
         NumKind kind = conversion.kind;
@@ -405,6 +612,7 @@ void registerCollections(Interpreter& interp) {
 
     interp.defineNative("remove", 2, 2, [](Interpreter&, Args& args) {
         if (args[0].isMap()) {
+            checkResizable(args[0].asMap(), "remove");
             Value removed;
             if (!args[0].asMap().remove(args[1], &removed)) {
                 throw RuntimeError("remove(): key " + toRepr(args[1]) + " not found in map");
@@ -427,6 +635,7 @@ void registerCollections(Interpreter& interp) {
 
     interp.defineNative("clear", 1, 1, [](Interpreter&, Args& args) {
         if (args[0].isMap()) {
+            checkResizable(args[0].asMap(), "clear");
             args[0].asMap().clearReferences();
         } else {
             listArg(args, 0, "clear").items.clear();
@@ -591,6 +800,7 @@ void registerCollections(Interpreter& interp) {
         if (args[0].isMap()) {
             auto copy = in.newMap();
             for (const auto& entry : args[0].asMap().entries) copy->set(entry.first, entry.second);
+            copy->structInfo = args[0].asMap().structInfo;  // a copy of a struct is the same kind of struct
             return Value::fromMap(copy);
         }
         return args[0];
@@ -1062,6 +1272,81 @@ void registerFiles(Interpreter& interp) {
         if (indent < 0 || indent > 16) throw RuntimeError("json_stringify() indent must be from 0 to 16");
         return Value::fromString(jsonStringify(args[0], static_cast<int>(indent)));
     });
+
+    interp.defineNative("is_dir", 1, 1, [](Interpreter&, Args& args) {
+        std::error_code ignored;
+        return Value::fromBool(std::filesystem::is_directory(stringArg(args, 0, "is_dir"), ignored));
+    });
+
+    interp.defineNative("make_dir", 1, 1, [](Interpreter&, Args& args) {
+        const std::string& path = stringArg(args, 0, "make_dir");
+        std::error_code error;
+        bool created = std::filesystem::create_directories(path, error);
+        if (error) throw RuntimeError("make_dir(): can't create '" + path + "': " + error.message());
+        return Value::fromBool(created);
+    });
+
+    interp.defineNative("list_dir", 0, 1, [](Interpreter& in, Args& args) {
+        std::string path = args.empty() ? "." : stringArg(args, 0, "list_dir");
+        std::error_code error;
+        std::vector<std::string> names;
+        for (std::filesystem::directory_iterator it(path, error), end; !error && it != end; it.increment(error)) {
+            names.push_back(it->path().filename().string());
+        }
+        if (error) throw RuntimeError("list_dir(): can't read the folder '" + path + "': " + error.message());
+        std::sort(names.begin(), names.end());
+        std::vector<Value> items;
+        for (auto& name : names) items.push_back(Value::fromString(std::move(name)));
+        return Value::fromList(in.newList(std::move(items)));
+    });
+}
+
+void registerRegex(Interpreter& interp) {
+    interp.defineNative("regex_match", 2, 2, [](Interpreter&, Args& args) {
+        std::regex pattern = compileRegex(args, 1, "regex_match");
+        const std::string& text = stringArg(args, 0, "regex_match");
+        return withRegex("regex_match", [&] { return Value::fromBool(std::regex_match(text, pattern)); });
+    });
+
+    interp.defineNative("regex_search", 2, 2, [](Interpreter& in, Args& args) {
+        std::regex pattern = compileRegex(args, 1, "regex_search");
+        const std::string& text = stringArg(args, 0, "regex_search");
+        return withRegex("regex_search", [&] {
+            std::smatch match;
+            return std::regex_search(text, match, pattern) ? matchGroups(in, match) : Value();
+        });
+    });
+
+    interp.defineNative("regex_find_all", 2, 2, [](Interpreter& in, Args& args) {
+        std::regex pattern = compileRegex(args, 1, "regex_find_all");
+        const std::string& text = stringArg(args, 0, "regex_find_all");
+        return withRegex("regex_find_all", [&] {
+            std::vector<Value> found;
+            for (std::sregex_iterator it(text.begin(), text.end(), pattern), end; it != end; ++it) {
+                found.push_back(Value::fromString(it->str()));
+            }
+            return Value::fromList(in.newList(std::move(found)));
+        });
+    });
+
+    interp.defineNative("regex_replace", 3, 3, [](Interpreter&, Args& args) {
+        std::regex pattern = compileRegex(args, 1, "regex_replace");
+        const std::string& text = stringArg(args, 0, "regex_replace");
+        const std::string& replacement = stringArg(args, 2, "regex_replace");
+        return withRegex("regex_replace", [&] { return Value::fromString(std::regex_replace(text, pattern, replacement)); });
+    });
+
+    interp.defineNative("regex_split", 2, 2, [](Interpreter& in, Args& args) {
+        std::regex pattern = compileRegex(args, 1, "regex_split");
+        const std::string& text = stringArg(args, 0, "regex_split");
+        return withRegex("regex_split", [&] {
+            std::vector<Value> parts;
+            for (std::sregex_token_iterator it(text.begin(), text.end(), pattern, -1), end; it != end; ++it) {
+                parts.push_back(Value::fromString(it->str()));
+            }
+            return Value::fromList(in.newList(std::move(parts)));
+        });
+    });
 }
 
 }  // namespace
@@ -1106,6 +1391,7 @@ void registerStandardLibrary(Interpreter& interpreter) {
     registerMath(interpreter);
     registerSystem(interpreter);
     registerFiles(interpreter);
+    registerRegex(interpreter);
 }
 
 }  // namespace ascend
