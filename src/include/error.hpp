@@ -19,6 +19,14 @@ struct Diagnostic {
     std::string message;
 };
 
+// Set whenever a RuntimeError is created. As the error unwinds, the
+// interpreter notes the innermost expression or statement that was running
+// and clears this (see Interpreter::ErrorSite).
+inline bool& runtimeErrorPending() {
+    static thread_local bool pending = false;
+    return pending;
+}
+
 // An error raised while a program runs. Errors created deep inside the runtime
 // (for example inside a builtin function) don't know where in the source they
 // happened, so they start with line == 0 and the interpreter fills in the
@@ -26,7 +34,9 @@ struct Diagnostic {
 class RuntimeError : public std::runtime_error {
 public:
     explicit RuntimeError(const std::string& message, int line = 0, int column = 0)
-        : std::runtime_error(message), line(line), column(column) {}
+        : std::runtime_error(message), line(line), column(column) {
+        runtimeErrorPending() = true;
+    }
 
     bool hasLocation() const { return line > 0; }
 

@@ -207,6 +207,28 @@ private:
     const FunctionExpr* savedFunction_;
 };
 
+// Notes where a runtime error happened, as the error unwinds through the
+// expressions and statements being evaluated: the innermost one is the
+// location reported. Doing this in a destructor instead of catching and
+// rethrowing at every level matters for deep recursion: with MSVC, each
+// rethrow happens on top of the frames being unwound, so thousands of them
+// overflow the stack.
+class Interpreter::ErrorSite {
+public:
+    ErrorSite(Interpreter& interpreter, int line, int column)
+        : interpreter_(interpreter), line_(line), column_(column) {}
+    ~ErrorSite() {
+        if (runtimeErrorPending()) interpreter_.noteErrorSite(line_, column_);
+    }
+    ErrorSite(const ErrorSite&) = delete;
+    ErrorSite& operator=(const ErrorSite&) = delete;
+
+private:
+    Interpreter& interpreter_;
+    int line_;
+    int column_;
+};
+
 // ---------------------------------------------------------------------------
 // Setup and memory management
 
@@ -325,12 +347,30 @@ void Interpreter::defineBuiltin(const std::string& name, Value value) { builtins
 
 void Interpreter::defineGlobal(const std::string& name, Value value) { globals_->define(name, std::move(value)); }
 
-void Interpreter::locate(RuntimeError& error, int line, int column) const {
-    if (!error.hasLocation()) {
-        error.line = line;
-        error.column = column;
+void Interpreter::noteErrorSite(int line, int column) {
+    runtimeErrorPending() = false;
+    hasErrorSite_ = true;
+    errorLine_ = line;
+    errorColumn_ = column;
+    errorSource_ = currentSource_;
+}
+
+// Fills in where an error happened, if it doesn't say already.
+void Interpreter::applyErrorSite(RuntimeError& error) {
+    if (hasErrorSite_) {
+        if (!error.hasLocation()) {
+            error.line = errorLine_;
+            error.column = errorColumn_;
+        }
+        if (error.source == nullptr) error.source = errorSource_;
     }
     if (error.source == nullptr) error.source = currentSource_;
+    clearErrorSite();
+}
+
+void Interpreter::clearErrorSite() {
+    runtimeErrorPending() = false;
+    hasErrorSite_ = false;
 }
 
 void Interpreter::checkStack() const {
@@ -351,8 +391,13 @@ void Interpreter::execute(std::unique_ptr<Program> program, std::unique_ptr<Sour
     programs_.push_back(std::move(program));
     const SourceFile* saved = currentSource_;
     currentSource_ = sources_.back().get();
+    clearErrorSite();
     try {
         runTopLevel(*programs_.back(), globals_, replMode_);
+    } catch (RuntimeError& error) {
+        applyErrorSite(error);
+        currentSource_ = saved;
+        throw;
     } catch (...) {
         currentSource_ = saved;
         throw;
@@ -454,12 +499,8 @@ Value Interpreter::importModule(const std::string& path) {
 // Statements
 
 Interpreter::Flow Interpreter::exec(const Stmt& stmt, const EnvPtr& env) {
-    try {
-        return execStmt(stmt, env);
-    } catch (RuntimeError& error) {
-        locate(error, stmt.line, stmt.column);
-        throw;
-    }
+    ErrorSite site(*this, stmt.line, stmt.column);
+    return execStmt(stmt, env);
 }
 
 Interpreter::Flow Interpreter::execStmt(const Stmt& stmt, const EnvPtr& env) {
@@ -717,11 +758,9 @@ Interpreter::Flow Interpreter::execFor(const ForStmt& loop, const EnvPtr& env) {
                 std::vector<Value> args;
                 for (const auto& arg : call.args) args.push_back(eval(*arg, env));
                 RangeSpec range;
-                try {
+                {
+                    ErrorSite site(*this, call.line, call.column);  // a bad range() argument
                     range = makeRange(args);
-                } catch (RuntimeError& error) {
-                    locate(error, call.line, call.column);
-                    throw;
                 }
                 for (uint64_t i = 0; i < range.count; ++i) {
                     Flow flow = iteration(Value::fromInt(static_cast<int64_t>(i)), Value::fromInt(range.at(i)));
@@ -778,6 +817,7 @@ Interpreter::Flow Interpreter::execTry(const TryStmt& stmt, const EnvPtr& env) {
     try {
         return execScoped(stmt.body, env);
     } catch (const RuntimeError& error) {
+        clearErrorSite();  // handled, so where it happened no longer matters
         caught = Value::fromString(error.what());
     } catch (const ThrownValue& thrown) {
         caught = thrown.value;
@@ -807,13 +847,9 @@ Interpreter::Flow Interpreter::execMatch(const MatchStmt& stmt, const EnvPtr& en
 // Expressions
 
 Value Interpreter::eval(const Expr& expr, const EnvPtr& env) {
-    try {
-        checkStack();
-        return evalExpr(expr, env);
-    } catch (RuntimeError& error) {
-        locate(error, expr.line, expr.column);
-        throw;
-    }
+    ErrorSite site(*this, expr.line, expr.column);
+    checkStack();
+    return evalExpr(expr, env);
 }
 
 Value Interpreter::evalExpr(const Expr& expr, const EnvPtr& env) {
@@ -883,12 +919,8 @@ Value Interpreter::evalExpr(const Expr& expr, const EnvPtr& env) {
             for (const auto& entry : literal.entries) {
                 Value key = eval(*entry.first, env);
                 Value value = eval(*entry.second, env);
-                try {
-                    map->set(key, std::move(value));
-                } catch (RuntimeError& error) {
-                    locate(error, entry.first->line, entry.first->column);
-                    throw;
-                }
+                ErrorSite site(*this, entry.first->line, entry.first->column);  // e.g. a list used as a key
+                map->set(key, std::move(value));
             }
             return Value::fromMap(map);
         }
@@ -951,12 +983,8 @@ Value Interpreter::evalFString(const FStringExpr& expr, const EnvPtr& env) {
             continue;
         }
         Value value = eval(*part.expr, env);
-        try {
-            result += part.spec.empty() ? toString(value) : formatValue(value, part.spec);
-        } catch (RuntimeError& error) {
-            locate(error, part.expr->line, part.expr->column);
-            throw;
-        }
+        ErrorSite site(*this, part.expr->line, part.expr->column);  // e.g. a bad format spec
+        result += part.spec.empty() ? toString(value) : formatValue(value, part.spec);
     }
     return Value::fromString(result);
 }
@@ -1013,12 +1041,8 @@ Value Interpreter::call(const Value& callee, std::vector<Value> args, int line, 
             throw RuntimeError(arityMessage(native.name, static_cast<size_t>(native.minArgs), native.maxArgs, count),
                                line, column);
         }
-        try {
-            return native.fn(*this, args);
-        } catch (RuntimeError& error) {
-            locate(error, line, column);
-            throw;
-        }
+        // Errors from the builtin are reported at the call (the enclosing ErrorSite).
+        return native.fn(*this, args);
     }
 
     auto& function = static_cast<FunctionObj&>(callable);

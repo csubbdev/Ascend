@@ -90,6 +90,7 @@ private:
     enum class Flow { Normal, Break, Continue, Return };
     using EnvPtr = std::shared_ptr<Environment>;
     class FrameGuard;
+    class ErrorSite;
 
     void runTopLevel(const Program& program, const EnvPtr& env, bool echo);
     Flow exec(const Stmt& stmt, const EnvPtr& env);
@@ -116,7 +117,9 @@ private:
 
     Value zeroValue(const TypeSpec& type);
     Value coerceVariable(const std::string& name, const TypeSpec& type, Value value);
-    void locate(RuntimeError& error, int line, int column) const;
+    void noteErrorSite(int line, int column);
+    void applyErrorSite(RuntimeError& error);
+    void clearErrorSite();
     void checkStack() const;
     std::string importDirectory() const;
 
@@ -136,6 +139,10 @@ private:
     const Callable* rangeFunction_ = nullptr;
     const SourceFile* currentSource_ = nullptr;
     const FunctionExpr* currentFunction_ = nullptr;
+    bool hasErrorSite_ = false;  // where the error being raised happened (see ErrorSite)
+    int errorLine_ = 0;
+    int errorColumn_ = 0;
+    const SourceFile* errorSource_ = nullptr;
     bool replMode_ = false;
     int callDepth_ = 0;
     int maxCallDepth_;
