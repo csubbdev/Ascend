@@ -1,11 +1,11 @@
 # Ascend language guide
 
-Ascend is a small scripting language with optional static-style types. This
-page covers the whole language; the builtin functions are listed in
+Ascend is a small scripting language with optional C-style types. This page
+covers the whole language; the builtin functions are listed in
 [standard_library.md](standard_library.md).
 
 ```
-func greet(name: string, greeting: string = "Hello") -> string {
+string greet(string name, string greeting = "Hello") {
     return f"{greeting}, {name}!"
 }
 
@@ -30,17 +30,17 @@ inside `( )` and `[ ]`, so long calls and lists can span several lines.
 
 ## Variables and types
 
-Types are optional. Write `name := value` to let the value decide, or
-`name: type = value` to fix the variable's type:
+Types are optional. Write `name := value` to let the value decide, or put a
+type in front of the name, like in C, to fix the variable's type:
 
 ```
 count := 0            // no declared type
-age: u8 = 30          // always a u8
-ratio: f32 = 0.5
-initial: char = 'A'
-title: string = "Ascend"
-nickname: string?     // the ? allows null; without a value this starts as null
-total: i64            // without a value it starts at zero
+u8 age = 30           // always a u8
+f32 ratio = 0.5
+char initial = 'A'
+string title = "Ascend"
+string? nickname      // the ? allows null; without a value this starts as null
+i64 total             // without a value it starts at zero
 ```
 
 `=` changes an existing variable (`count = 5`, `count += 1`). Assigning to a
@@ -50,15 +50,15 @@ A typed variable only ever holds values of its type. Numbers convert
 automatically when nothing is lost; anything else is an error:
 
 ```
-age: u8 = 30
+u8 age = 30
 age = 31          // fine
 age = 300         // error: 'age' is declared as u8, so it can't hold 300 (u8 is 0 to 255)
 age = "old"       // error: ... can't hold a string (use u8(...) to convert a string)
-x: i32 = 2.0      // fine: 2.0 is a whole number
+i32 x = 2.0       // fine: 2.0 is a whole number
 x = 2.5           // error: ... (use i32(...) to drop the fraction)
 ```
 
-Mistakes in literals like `age: u8 = 300` are reported before the program
+Mistakes in literals like `u8 age = 300` are reported before the program
 starts running.
 
 ### The types
@@ -90,7 +90,7 @@ Without a value, a typed variable starts at its type's zero value: `0`,
 
 ```
 const MAX_PLAYERS = 4
-const RATE: f64 = 0.07
+const f64 RATE = 0.07
 MAX_PLAYERS = 5      // error: can't change 'MAX_PLAYERS': it's a constant
 ```
 
@@ -117,14 +117,14 @@ else is truthy.
 
 How arithmetic picks its result type:
 
-- A plain literal adapts to the other side: with `x: u8`, `x + 1` is a `u8`.
+- A plain literal adapts to the other side: with `u8 x`, `x + 1` is a `u8`.
 - Two different integer types give the smallest type that holds both:
   `u8 + i32` is an `i32`, `u8 + i8` is an `i16`. (`u64` can't be mixed with
   signed types; convert one side.)
 - An integer and a float give the float's type: `i32 + f32` is an `f32`.
 - `f32` and `f64` give `f64`.
 
-**Overflow is an error**, never a silent wrap: with `x: u8 = 250`, `x + 10`
+**Overflow is an error**, never a silent wrap: with `u8 x = 250`, `x + 10`
 reports `integer overflow: 250 + 10 doesn't fit in u8 (0 to 255)`.
 
 - `int / int` truncates toward zero (`7 / 2 == 3`). If either side is a float
@@ -282,25 +282,45 @@ arm affect the surrounding loop or function.
 
 ## Functions
 
+A typed function is written like in C: the return type first, then the name,
+then the parameters, each with its type before its name:
+
 ```
-func area(width: f64, height: f64 = width) -> f64 {
+f64 area(f64 width, f64 height = width) {
     return width * height
+}
+
+void log(string message) {
+    print("log:", message)
 }
 
 area(3)       // 9.0
 area(3, 4)    // 12.0
 ```
 
-- Parameter and return types are optional. Arguments are converted to the
-  parameter's type (an `int` passed to an `f64` parameter becomes a float) or
-  rejected: `area("big")` is an error.
-- `-> void` means the function returns nothing; `-> T?` allows returning `null`.
-  A function with a return type that ends without `return` is an error.
+Functions without types start with `func`:
+
+```
+func add(a, b) {
+    return a + b
+}
+```
+
+- Types are optional, and can be mixed: `func f(i32 count, label) { }`.
+  Arguments are converted to the parameter's type (an `int` passed to an `f64`
+  parameter becomes a float) or rejected: `area("big")` is an error.
+- `void` means the function returns nothing; `string?` and other nullable
+  return types allow returning `null`. A function with a return type that
+  ends without `return` is an error.
 - A function without `return` (or with a bare `return`) returns `null`.
 - Parameters with default values must come after the ones without.
-- Functions declared with `func name(...)` can be called anywhere in the block
-  that declares them, even before the declaration, so they can call each other.
+- Functions can be called anywhere in the block that declares them, even
+  before the declaration, so they can call each other.
 - Anonymous functions are expressions: `double := func(x) { return x * 2 }`.
+  They can have types too, with the return type after an arrow:
+  `func(i32 x) -> i32 { return x * 2 }`.
+- To store a function in a typed variable, use the type `func`:
+  `func handler = print`.
 - Functions are closures: they keep access to the variables around them.
 
 ```
@@ -339,7 +359,7 @@ Names starting with `_` stay private.
 
 ```
 // geometry.asc
-func circle_area(r: f64) -> f64 { return PI * r ** 2 }
+f64 circle_area(f64 r) { return PI * r ** 2 }
 
 // main.asc
 geometry := import("geometry")

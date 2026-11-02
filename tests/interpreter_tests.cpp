@@ -476,8 +476,8 @@ TEST(interp_cycle_collector_frees_closures) {
 
 TEST(interp_typed_variables) {
     CHECK_OUTPUT(
-        "a: i8 = -5\nb: u16 = 60000\nc: u64 = 18446744073709551615u64\nd: f32 = 0.1\ne: f64 = 0.1\n"
-        "f: char = 'x'\ng: string = \"s\"\nh: bool = true\nk: byte = 255\n"
+        "i8 a = -5\nu16 b = 60000\nu64 c = 18446744073709551615u64\nf32 d = 0.1\nf64 e = 0.1\n"
+        "char f = 'x'\nstring g = \"s\"\nbool h = true\nbyte k = 255\n"
         "print(a, b, c, d, e, f, g, h, k)\n"
         "print(type(a), type(b), type(c), type(d), type(e), type(f), type(g), type(h), type(k), type(1), type(1.0))",
         "-5 60000 18446744073709551615 0.1 0.1 x s true 255\n"
@@ -485,59 +485,59 @@ TEST(interp_typed_variables) {
 }
 
 TEST(interp_zero_values) {
-    CHECK_OUTPUT("a: i32\nb: f64\nc: bool\nd: string\ne: char\nf: list\ng: map\nh: string?\n"
+    CHECK_OUTPUT("i32 a\nf64 b\nbool c\nstring d\nchar e\nlist f\nmap g\nstring? h\n"
                  "print(a, b, c, repr(d), ord(e), f, g, h)",
                  "0 0.0 false \"\" 0 [] {} null\n");
 }
 
 TEST(interp_typed_variables_keep_their_type) {
-    CHECK_OUTPUT("x: u8 = 10\nx = 20\nx += 5\nprint(x, type(x))", "25 u8\n");
-    CHECK_OUTPUT("x: f64 = 1\nprint(x, type(x))", "1.0 f64\n");  // ints convert to floats
-    CHECK_OUTPUT("x: i32 = 3.0\nprint(x)", "3\n");                 // whole floats convert to ints
-    CHECK_OUTPUT("s: string = 'c'\nprint(s, type(s))", "c string\n");
-    CHECK_ERROR("x: u8 = 10\nx = 256", "'x' is declared as u8, so it can't hold 256 (u8 is 0 to 255)");
-    CHECK_ERROR("x: i32 = 1\nx = 2.5", "can't hold 2.5 (use i32(...) to drop the fraction)");
-    CHECK_ERROR("x: i32 = 1\nx = \"5\"", "can't hold a string (use i32(...) to convert a string)");
-    CHECK_ERROR("x: string = \"a\"\nx = null", "can't hold null (declare it as string? to allow null)");
-    CHECK_ERROR("x: char = 'a'\nx = \"b\"", "use single quotes for a char, like 'a'");
-    CHECK_OUTPUT("x: string? = \"a\"\nx = null\nprint(x)", "null\n");
-    CHECK_OUTPUT("x: u8 = 1\nx := \"now untyped\"\nprint(x)", "now untyped\n");  // := declares a new variable
+    CHECK_OUTPUT("u8 x = 10\nx = 20\nx += 5\nprint(x, type(x))", "25 u8\n");
+    CHECK_OUTPUT("f64 x = 1\nprint(x, type(x))", "1.0 f64\n");  // ints convert to floats
+    CHECK_OUTPUT("i32 x = 3.0\nprint(x)", "3\n");                 // whole floats convert to ints
+    CHECK_OUTPUT("string s = 'c'\nprint(s, type(s))", "c string\n");
+    CHECK_ERROR("u8 x = 10\nx = 256", "'x' is declared as u8, so it can't hold 256 (u8 is 0 to 255)");
+    CHECK_ERROR("i32 x = 1\nx = 2.5", "can't hold 2.5 (use i32(...) to drop the fraction)");
+    CHECK_ERROR("i32 x = 1\nx = \"5\"", "can't hold a string (use i32(...) to convert a string)");
+    CHECK_ERROR("string x = \"a\"\nx = null", "can't hold null (declare it as string? to allow null)");
+    CHECK_ERROR("char x = 'a'\nx = \"b\"", "use single quotes for a char, like 'a'");
+    CHECK_OUTPUT("string? x = \"a\"\nx = null\nprint(x)", "null\n");
+    CHECK_OUTPUT("u8 x = 1\nx := \"now untyped\"\nprint(x)", "now untyped\n");  // := declares a new variable
 }
 
 TEST(interp_static_type_errors) {
-    Result result = run("print(\"never runs\")\nx: u8 = 300");
+    Result result = run("print(\"never runs\")\nu8 x = 300");
     CHECK(result.status == RunStatus::SyntaxError);
     CHECK_EQ(result.out, std::string(""));
-    CHECK(contains(result.err, "test.asc:2:9: error: 'x' is declared as u8, so it can't hold 300 (u8 is 0 to 255)"));
-    CHECK_ERROR("x: bool = 1", "'x' is declared as bool, so it can't hold 1");
-    CHECK_ERROR("x: list = {}", "'x' is declared as list, so it can't hold a map");
-    CHECK_ERROR("f: func", "'f' is declared as func, so it needs a value");
+    CHECK(contains(result.err, "test.asc:2:8: error: 'x' is declared as u8, so it can't hold 300 (u8 is 0 to 255)"));
+    CHECK_ERROR("bool x = 1", "'x' is declared as bool, so it can't hold 1");
+    CHECK_ERROR("list x = {}", "'x' is declared as list, so it can't hold a map");
+    CHECK_ERROR("func f", "'f' is declared as func, so it needs a value");
 }
 
 TEST(interp_integer_overflow_per_type) {
-    CHECK_ERROR("x: u8 = 250\nx += 10", "integer overflow: 250 + 10 doesn't fit in u8 (0 to 255)");
-    CHECK_ERROR("x: i8 = 100\nprint(x * 2)", "integer overflow: 100 * 2 doesn't fit in i8 (-128 to 127)");
-    CHECK_ERROR("x: u32 = 0\nprint(x - 1)", "integer overflow: 0 - 1 doesn't fit in u32");
-    CHECK_ERROR("x: i8 = -128\nprint(-x)", "integer overflow: -(-128) doesn't fit in i8");
-    CHECK_ERROR("x: u8 = 1\nprint(-x)", "can't negate 1: u8 is unsigned");
-    CHECK_ERROR("x: u8 = 1\nprint(x + 300)", "300 doesn't fit in u8 (0 to 255)");
-    CHECK_OUTPUT("x: u64 = 18446744073709551614u64\nx += 1\nprint(x)", "18446744073709551615\n");
-    CHECK_ERROR("x: u64 = 18446744073709551615u64\nx += 1", "integer overflow");
+    CHECK_ERROR("u8 x = 250\nx += 10", "integer overflow: 250 + 10 doesn't fit in u8 (0 to 255)");
+    CHECK_ERROR("i8 x = 100\nprint(x * 2)", "integer overflow: 100 * 2 doesn't fit in i8 (-128 to 127)");
+    CHECK_ERROR("u32 x = 0\nprint(x - 1)", "integer overflow: 0 - 1 doesn't fit in u32");
+    CHECK_ERROR("i8 x = -128\nprint(-x)", "integer overflow: -(-128) doesn't fit in i8");
+    CHECK_ERROR("u8 x = 1\nprint(-x)", "can't negate 1: u8 is unsigned");
+    CHECK_ERROR("u8 x = 1\nprint(x + 300)", "300 doesn't fit in u8 (0 to 255)");
+    CHECK_OUTPUT("u64 x = 18446744073709551614u64\nx += 1\nprint(x)", "18446744073709551615\n");
+    CHECK_ERROR("u64 x = 18446744073709551615u64\nx += 1", "integer overflow");
     CHECK_ERROR("print(2i32 ** 31)", "doesn't fit in i32");
     CHECK_OUTPUT("print(2i32 ** 30, 3u8 ** 5)", "1073741824 243\n");
 }
 
 TEST(interp_mixed_type_arithmetic) {
-    CHECK_OUTPUT("a: u8 = 1\nb: i32 = 2\nc: i8 = 3\nd: f32 = 1.5\ne: f64 = 2.0\n"
+    CHECK_OUTPUT("u8 a = 1\ni32 b = 2\ni8 c = 3\nf32 d = 1.5\nf64 e = 2.0\n"
                  "print(type(a + 1), type(a + b), type(a + c), type(b + d), type(d + e), type(d * 2), type(a + 1.5))",
                  "u8 i32 i16 f32 f64 f32 float\n");
-    CHECK_ERROR("a: u64 = 1\nb: i64 = 2\nprint(a + b)", "can't mix u64 and i64");
+    CHECK_ERROR("u64 a = 1\ni64 b = 2\nprint(a + b)", "can't mix u64 and i64");
     CHECK_OUTPUT("print(7u8 / 2, 7i32 % 3, 7.0f32 / 2)", "3 1 3.5\n");
-    CHECK_OUTPUT("a: u8 = 200\nb: i8 = -100\nprint(a > b, a == 200, 200 == a, 1u8 == 1.0)", "true true true true\n");
+    CHECK_OUTPUT("u8 a = 200\ni8 b = -100\nprint(a > b, a == 200, 200 == a, 1u8 == 1.0)", "true true true true\n");
 }
 
 TEST(interp_f32_precision) {
-    CHECK_OUTPUT("x: f32 = 0.1\ny: f64 = 0.1\nprint(x, y, f64(x), x == y)", "0.1 0.1 0.10000000149011612 false\n");
+    CHECK_OUTPUT("f32 x = 0.1\nf64 y = 0.1\nprint(x, y, f64(x), x == y)", "0.1 0.1 0.10000000149011612 false\n");
     CHECK_OUTPUT("print(f32(1) / 3, 1.0 / 3)", "0.33333334 0.3333333333333333\n");
 }
 
@@ -561,8 +561,8 @@ TEST(interp_number_literals) {
 
 TEST(interp_bitwise_operators) {
     CHECK_OUTPUT("print(12 & 10, 12 | 10, 12 ^ 10, ~0, 1 << 10, -16 >> 2, 0xF0 >> 4)", "8 14 6 -1 1024 -4 15\n");
-    CHECK_OUTPUT("x: u8 = 0b1111_0000\nprint(~x, x << 1, x >> 4, type(x << 1))", "15 224 15 u8\n");
-    CHECK_OUTPUT("x: i8 = -1\nprint(x << 1, x >> 1)", "-2 -1\n");
+    CHECK_OUTPUT("u8 x = 0b1111_0000\nprint(~x, x << 1, x >> 4, type(x << 1))", "15 224 15 u8\n");
+    CHECK_OUTPUT("i8 x = -1\nprint(x << 1, x >> 1)", "-2 -1\n");
     CHECK_OUTPUT("flags := 0\nflags |= 4\nflags |= 1\nflags &= ~4\nflags ^= 2\nflags <<= 1\nprint(flags, flags & 1 == 0)",
                  "6 true\n");
     CHECK_ERROR("print(1u8 << 8)", "shift amount 8 is out of range for u8 (0 to 7)");
@@ -587,7 +587,7 @@ TEST(interp_unicode_strings) {
 }
 
 TEST(interp_constants) {
-    CHECK_OUTPUT("const MAX = 10\nconst NAME: string = \"x\"\nprint(MAX, NAME)", "10 x\n");
+    CHECK_OUTPUT("const MAX = 10\nconst string NAME = \"x\"\nprint(MAX, NAME)", "10 x\n");
     CHECK_ERROR("const MAX = 10\nMAX = 11", "can't change 'MAX': it's a constant");
     CHECK_ERROR("const MAX = 10\nMAX += 1", "can't change 'MAX': it's a constant");
     CHECK_ERROR("const MAX = 10\nMAX := 11", "'MAX' is a constant and can't be declared again");
@@ -595,18 +595,29 @@ TEST(interp_constants) {
 }
 
 TEST(interp_typed_functions) {
-    CHECK_OUTPUT("func area(w: f64, h: f64) -> f64 { return w * h }\nprint(area(2, 3), type(area(2, 3)))", "6.0 f64\n");
-    CHECK_OUTPUT("func half(n: i32) -> i32 { return n / 2 }\nprint(half(7))", "3\n");
-    CHECK_OUTPUT("func find(xs: list, x) -> i32? {\n  for i, v in xs { if v == x { return i } }\n  return null\n}\n"
+    CHECK_OUTPUT("func area(f64 w, f64 h) -> f64 { return w * h }\nprint(area(2, 3), type(area(2, 3)))", "6.0 f64\n");
+    CHECK_OUTPUT("func half(i32 n) -> i32 { return n / 2 }\nprint(half(7))", "3\n");
+    CHECK_OUTPUT("func find(list xs, x) -> i32? {\n  for i, v in xs { if v == x { return i } }\n  return null\n}\n"
                  "print(find([5, 6], 6), find([], 1))",
                  "1 null\n");
-    CHECK_OUTPUT("func log(msg: string) -> void { print(\"log:\", msg) }\nlog(\"hi\")", "log: hi\n");
-    CHECK_ERROR("func f(n: u8) { }\nf(256)", "f() expects 'n' to be u8, but got 256 (u8 is 0 to 255)");
-    CHECK_ERROR("func f(s: string) { }\nf(1)", "f() expects 's' to be string, but got 1");
+    CHECK_OUTPUT("func log(string msg) -> void { print(\"log:\", msg) }\nlog(\"hi\")", "log: hi\n");
+    CHECK_ERROR("func f(u8 n) { }\nf(256)", "f() expects 'n' to be u8, but got 256 (u8 is 0 to 255)");
+    CHECK_ERROR("func f(string s) { }\nf(1)", "f() expects 's' to be string, but got 1");
     CHECK_ERROR("func f(x) -> i32 { return x }\nf(\"no\")", "f() must return i32, but returned a string");
     CHECK_ERROR("func f() -> i32 { }\nf()", "f() must return i32, but it ended without returning a value");
-    CHECK_ERROR("func f() -> void { return 1 }", "f() is declared '-> void', so it can't return a value");
-    CHECK_ERROR("func f(n: u8) {\n  n = 300\n}\nf(1)", "'n' is declared as u8, so it can't hold 300");
+    CHECK_ERROR("func f() -> void { return 1 }", "f() returns void, so it can't return a value");
+    CHECK_ERROR("void f() { return 1 }", "f() returns void, so it can't return a value");
+    CHECK_ERROR("func f(u8 n) {\n  n = 300\n}\nf(1)", "'n' is declared as u8, so it can't hold 300");
+}
+
+TEST(interp_c_style_functions) {
+    CHECK_OUTPUT("i32 add(i32 a, i32 b = 1) {\n  return a + b\n}\nprint(add(2, 3), add(4), type(add(1, 1)))", "5 5 i32\n");
+    CHECK_OUTPUT("void greet(string name) {\n  print(f\"hi {name}\")\n}\ngreet(\"Ada\")", "hi Ada\n");
+    CHECK_OUTPUT("string? lookup(map m, string key) {\n  return get(m, key)\n}\nprint(lookup({a: \"x\"}, \"a\"), lookup({}, \"b\"))",
+                 "x null\n");
+    CHECK_OUTPUT("print(twice(21))\ni64 twice(i64 n) { return n * 2 }", "42\n");  // hoisted like `func`
+    CHECK_OUTPUT("func handler = print\nhandler(\"called\")\nfunc? maybe\nprint(maybe)", "called\nnull\n");
+    CHECK_ERROR("u8 small(i32 n) { return n }\nsmall(300)", "small() must return u8, but returned 300 (u8 is 0 to 255)");
 }
 
 TEST(interp_match) {
@@ -706,7 +717,7 @@ TEST(interp_system_tools) {
 
 TEST(interp_imports) {
     TempFile module("ascend_test_module.asc",
-                    "func square(n: i32) -> i32 { return n * n }\n"
+                    "func square(i32 n) -> i32 { return n * n }\n"
                     "VERSION := \"1.0\"\n_private := 1\n"
                     "func fail() { return 1 / 0 }\n");
     TempFile broken("ascend_test_broken.asc", "x := (\n");
@@ -728,5 +739,5 @@ TEST(interp_check_only_mode) {
     options.checkOnly = true;
     CHECK(runSource(interpreter, "print(\"not run\")", options, err).status == RunStatus::Ok);
     CHECK_EQ(out.str(), std::string(""));
-    CHECK(runSource(interpreter, "x: u8 = 999", options, err).status == RunStatus::SyntaxError);
+    CHECK(runSource(interpreter, "u8 x = 999", options, err).status == RunStatus::SyntaxError);
 }

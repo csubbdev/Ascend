@@ -10,7 +10,7 @@ namespace ascend {
 //
 // `Int` and `Float` are the types of plain literals like `42` and `1.5`.
 // They behave like i64 and f64, but adapt to the other operand in arithmetic,
-// so with `x: u8 = 200`, `x + 1` is a u8 (like untyped constants in Go).
+// so with `u8 x = 200`, `x + 1` is a u8 (like untyped constants in Go).
 enum class NumKind : uint8_t { Int, I8, I16, I32, I64, U8, U16, U32, U64, Float, F32, F64 };
 
 inline bool isIntKind(NumKind kind) { return kind <= NumKind::U64; }
@@ -26,7 +26,7 @@ std::string rangeText(NumKind kind);  // e.g. "0 to 255"
 
 enum class TypeKind : uint8_t { Any, Void, Bool, Number, Char, String, List, Map, Function };
 
-// A type annotation, such as the `u8` in `x: u8 = 1` or `string?` (nullable).
+// A type annotation, such as the `u8` in `u8 x = 1` or `string?` (nullable).
 struct TypeSpec {
     TypeKind kind = TypeKind::Any;
     NumKind num = NumKind::Int;  // used when kind == Number

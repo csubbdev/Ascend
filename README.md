@@ -1,10 +1,12 @@
 # Ascend
 
+[![Build](https://github.com/csubbdev/Ascend/actions/workflows/build.yml/badge.svg)](https://github.com/csubbdev/Ascend/actions/workflows/build.yml)
+
 Ascend is a small, friendly scripting language with optional types, written in
 C++17.
 
 ```
-func fizzbuzz(n: i32) -> string {
+string fizzbuzz(i32 n) {
     if n % 15 == 0 { return "FizzBuzz" }
     if n % 3 == 0 { return "Fizz" }
     if n % 5 == 0 { return "Buzz" }
@@ -15,7 +17,7 @@ for i in range(1, 16) {
     print(fizzbuzz(i))
 }
 
-level: u8 = 2
+u8 level = 2
 match level {
     1 => print("easy")
     2, 3 => print("normal")
@@ -30,10 +32,11 @@ for name, score in scores {
 
 ## Features
 
-- **Optional types**: `i8`–`i64`, `u8`–`u64`, `byte`, `f32`, `f64`, `bool`,
-  `char`, `string`, `list`, `map`, `func` and nullable `T?`. Typed variables,
-  parameters and return values are checked, and integer overflow is an error
-  instead of a silent wrap.
+- **Optional C-style types**: `u8 age = 30`, `i32 add(i32 a, i32 b) { }` with
+  `i8`–`i64`, `u8`–`u64`, `byte`, `f32`, `f64`, `bool`, `char`, `string`,
+  `list`, `map`, `func`, `void` and nullable types like `string?`. Typed
+  variables, parameters and return values are checked, and integer overflow is
+  an error instead of a silent wrap.
 - Constants, `match`, `if` / `else if`, `while`, `for ... in` over ranges,
   lists, strings and maps, `break` / `continue`
 - Functions with default parameters, recursion, closures and anonymous functions
@@ -46,9 +49,9 @@ for name, score in scores {
 - Clear error messages that point at the problem, many caught before running:
 
   ```
-  script.asc:3:9: error: 'age' is declared as u8, so it can't hold 300 (u8 is 0 to 255)
-   3 | age: u8 = 300
-     |         ^
+  script.asc:3:10: error: 'age' is declared as u8, so it can't hold 300 (u8 is 0 to 255)
+   3 | u8 age = 300
+     |          ^
   ```
 
 - An interactive REPL, a `--check` mode, and syntax highlighting for VS Code

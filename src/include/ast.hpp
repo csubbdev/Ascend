@@ -171,14 +171,14 @@ struct ExpressionStmt final : Stmt {
     ExprPtr expr;
 };
 
-// name := value      name: type = value      name: type      const name = value
+// name := value      type name = value      type name      const [type] name = value
 struct DeclareStmt final : Stmt {
     DeclareStmt(int line, int column) : Stmt(StmtKind::Declare, line, column) {}
     std::string name;
     TypeSpec type;          // `any` when no type was written
     bool hasType = false;
     bool constant = false;
-    ExprPtr value;          // null for `name: type`, which starts at the type's zero value
+    ExprPtr value;          // null for `type name`, which starts at the type's zero value
 };
 
 // target = value, target += value, ...

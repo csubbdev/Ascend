@@ -44,10 +44,14 @@ private:
     StmtPtr throwStatement(const Token& keyword);
     StmtPtr functionDeclaration(const Token& keyword);
     StmtPtr typedDeclaration();
+    StmtPtr typedFunctionDeclaration();
     StmtPtr constDeclaration(const Token& keyword);
     StmtPtr matchStatement(const Token& keyword);
-    std::unique_ptr<FunctionExpr> functionRest(const Token& keyword, const std::string& name);
+    std::unique_ptr<FunctionExpr> functionRest(const Token& keyword, const std::string& name,
+                                               const TypeSpec* returnType = nullptr);
     TypeSpec parseType(bool allowVoid);
+    size_t typeLength(size_t offset) const;
+    static std::string unknownTypeMessage(const std::string& name);
     Block block(const std::string& what);
     static void noteStatement(Block& block, const Stmt& stmt);
     void parseStatementInto(Block& block);

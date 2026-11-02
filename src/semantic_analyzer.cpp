@@ -122,7 +122,7 @@ void SemanticAnalyzer::visitStmt(const Stmt& stmt) {
             const TypeSpec& type = function.returnType;
             std::string who = function.name.empty() ? "this function" : function.name + "()";
             if (type.kind == TypeKind::Void) {
-                if (ret.value) report(stmt.line, stmt.column, who + " is declared '-> void', so it can't return a value");
+                if (ret.value) report(stmt.line, stmt.column, who + " returns void, so it can't return a value");
             } else if (!ret.value && !type.isAny() && !type.nullable) {
                 report(stmt.line, stmt.column, who + " must return " + type.name() + ", but this returns nothing");
             } else {

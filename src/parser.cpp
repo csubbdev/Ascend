@@ -117,9 +117,24 @@ StmtPtr Parser::statement() {
         case TokenType::Throw: advance(); return throwStatement(token);
         case TokenType::Const: advance(); return constDeclaration(token);
         case TokenType::Match: advance(); return matchStatement(token);
-        case TokenType::Identifier:
-            if (peek(1).type == TokenType::Colon) return typedDeclaration();
+        case TokenType::Identifier: {
+            // C-style declarations: `u8 age = 30` and functions `i32 add(i32 a, i32 b) { }`.
+            size_t length = typeLength(0);
+            if (length > 0 && peek(length).type == TokenType::Identifier) {
+                if (peek(length + 1).type == TokenType::LeftParen) return typedFunctionDeclaration();
+                return typedDeclaration();
+            }
+            if (peek(1).type == TokenType::Colon) {
+                // The other common style, `age: u8 = 30`: suggest the C-style form.
+                std::string type = typeLength(2) > 0 ? peek(2).lexeme : "i32";
+                error(token, "write the type before the name, like '" + type + " " + token.lexeme + " = ...'");
+            }
+            if (length == 0 && peek(1).type == TokenType::Identifier) {
+                TypeSpec unused;
+                if (!lookupType(token.lexeme, unused)) error(token, unknownTypeMessage(token.lexeme));
+            }
             break;
+        }
         case TokenType::Break: {
             advance();
             auto stmt = nodeAt<BreakStmt>(token);
@@ -132,12 +147,22 @@ StmtPtr Parser::statement() {
             expectStatementEnd();
             return stmt;
         }
-        case TokenType::Func:
+        case TokenType::Func: {
+            // `func name(...)` declares a function; `func callback = ...` and
+            // `func? callback` declare a variable that holds one.
+            TokenType afterName = peek(2).type;
+            bool variable = peek(1).type == TokenType::Question ||
+                            (peek(1).type == TokenType::Identifier &&
+                             (afterName == TokenType::Equal || afterName == TokenType::Newline ||
+                              afterName == TokenType::Semicolon || afterName == TokenType::Eof ||
+                              afterName == TokenType::RightBrace));
+            if (variable) return typedDeclaration();
             if (peek(1).type == TokenType::Identifier) {
                 advance();
                 return functionDeclaration(token);
             }
             break;  // an anonymous function used as an expression
+        }
         case TokenType::LeftBrace: {
             auto stmt = nodeAt<BlockStmt>(token);
             stmt->body = block("block");
@@ -266,16 +291,32 @@ StmtPtr Parser::throwStatement(const Token& keyword) {
     return stmt;
 }
 
-// name: type = value   or   name: type   (which starts at the type's zero value)
+// How many tokens the type name starting `offset` tokens ahead takes up
+// (1 for `u8`, 2 for `string?`), or 0 if there is no type name there.
+size_t Parser::typeLength(size_t offset) const {
+    const Token& token = peek(offset);
+    TypeSpec type;
+    bool isType = token.type == TokenType::Func || (token.type == TokenType::Identifier && lookupType(token.lexeme, type));
+    if (!isType) return 0;
+    return peek(offset + 1).type == TokenType::Question ? 2 : 1;
+}
+
+std::string Parser::unknownTypeMessage(const std::string& name) {
+    return "unknown type '" + name +
+           "' (the types are: i8 i16 i32 i64 u8 u16 u32 u64 int byte f32 f64 float bool char string list map "
+           "func any)";
+}
+
+// type name = value   or   type name   (which starts at the type's zero value)
 StmtPtr Parser::typedDeclaration() {
-    const Token& name = advance();
-    advance();  // ':'
-    auto stmt = nodeAt<DeclareStmt>(name);
-    stmt->name = name.lexeme;
+    const Token& start = peek();
+    auto stmt = nodeAt<DeclareStmt>(start);
     stmt->type = parseType(false);
     stmt->hasType = true;
+    const Token& name = consume(TokenType::Identifier, "a variable name after the type");
+    stmt->name = name.lexeme;
     if (check(TokenType::Declare)) {
-        error(peek(), "use '=' after a type, like '" + name.lexeme + ": " + stmt->type.name() + " = ...'");
+        error(peek(), "use '=' in a typed declaration, like '" + stmt->type.name() + " " + name.lexeme + " = ...'");
     }
     if (match(TokenType::Equal)) {
         skipNewlines();
@@ -285,15 +326,30 @@ StmtPtr Parser::typedDeclaration() {
     return stmt;
 }
 
-// const NAME = value   or   const NAME: type = value
+// A function with its return type in front, C style: `i32 add(i32 a, i32 b) { ... }`
+StmtPtr Parser::typedFunctionDeclaration() {
+    const Token& start = peek();
+    TypeSpec returnType = parseType(true);
+    const Token& name = advance();
+    auto stmt = nodeAt<FunctionStmt>(start);
+    stmt->function = functionRest(name, name.lexeme, &returnType);
+    return stmt;
+}
+
+// const NAME = value   or   const type NAME = value
 StmtPtr Parser::constDeclaration(const Token& keyword) {
-    const Token& name = consume(TokenType::Identifier, "a name after 'const'");
-    auto stmt = nodeAt<DeclareStmt>(name);
-    stmt->name = name.lexeme;
+    auto stmt = nodeAt<DeclareStmt>(keyword);
     stmt->constant = true;
-    if (match(TokenType::Colon)) {
+    size_t length = typeLength(0);
+    if (length > 0 && peek(length).type == TokenType::Identifier) {
         stmt->type = parseType(false);
         stmt->hasType = true;
+    }
+    const Token& name = consume(TokenType::Identifier, "a name after 'const'");
+    stmt->name = name.lexeme;
+    if (check(TokenType::Colon)) {
+        std::string type = typeLength(1) > 0 ? peek(1).lexeme : "i32";
+        error(peek(), "write the type before the name, like 'const " + type + " " + name.lexeme + " = ...'");
     }
     if (!match(TokenType::Equal) && !match(TokenType::Declare)) {
         error(peek(), "a constant needs a value: 'const " + name.lexeme + " = ...'");
@@ -301,7 +357,6 @@ StmtPtr Parser::constDeclaration(const Token& keyword) {
     skipNewlines();
     stmt->value = expression();
     expectStatementEnd();
-    (void)keyword;
     return stmt;
 }
 
@@ -368,11 +423,7 @@ TypeSpec Parser::parseType(bool allowVoid) {
         error(token, "expected a type name (like i32, f64, string or bool), found " + describeToken(token));
     }
     TypeSpec type;
-    if (!lookupType(name, type)) {
-        error(token, "unknown type '" + name +
-                         "' (the types are: i8 i16 i32 i64 u8 u16 u32 u64 int byte f32 f64 float bool char string "
-                         "list map func any)");
-    }
+    if (!lookupType(name, type)) error(token, unknownTypeMessage(name));
     if (type.kind == TypeKind::Void && !allowVoid) error(token, "'void' can only be used as a return type");
     advance();
     if (match(TokenType::Question)) {
@@ -391,16 +442,25 @@ StmtPtr Parser::functionDeclaration(const Token& keyword) {
     return stmt;
 }
 
-std::unique_ptr<FunctionExpr> Parser::functionRest(const Token& keyword, const std::string& name) {
+// Parameters, optional `-> type` and the body of a function. A typed
+// parameter is written C style: `i32 count`.
+std::unique_ptr<FunctionExpr> Parser::functionRest(const Token& keyword, const std::string& name,
+                                                   const TypeSpec* returnType) {
     auto function = nodeAt<FunctionExpr>(keyword);
     function->name = name;
+    if (returnType != nullptr) function->returnType = *returnType;
     consume(TokenType::LeftParen, name.empty() ? "'(' after 'func'" : "'(' after the function name");
     bool sawDefault = false;
     while (!check(TokenType::RightParen)) {
-        const Token& param = consume(TokenType::Identifier, "a parameter name");
         Param parameter;
+        size_t length = typeLength(0);
+        if (length > 0 && peek(length).type == TokenType::Identifier) parameter.type = parseType(false);
+        const Token& param = consume(TokenType::Identifier, "a parameter name");
         parameter.name = param.lexeme;
-        if (match(TokenType::Colon)) parameter.type = parseType(false);
+        if (check(TokenType::Colon)) {
+            std::string type = typeLength(1) > 0 ? peek(1).lexeme : "i32";
+            error(peek(), "write the parameter's type before its name, like '" + type + " " + param.lexeme + "'");
+        }
         if (match(TokenType::Equal)) {
             parameter.defaultValue = expression();
             sawDefault = true;
@@ -413,7 +473,11 @@ std::unique_ptr<FunctionExpr> Parser::functionRest(const Token& keyword, const s
         if (!match(TokenType::Comma)) break;
     }
     consume(TokenType::RightParen, "')' after the parameters");
-    if (match(TokenType::Arrow)) function->returnType = parseType(true);
+    if (check(TokenType::Arrow)) {
+        if (returnType != nullptr) error(peek(), "the return type is already written before the function name");
+        advance();
+        function->returnType = parseType(true);
+    }
     function->body = block("function body");
     return function;
 }

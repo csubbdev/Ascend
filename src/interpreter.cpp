@@ -586,7 +586,7 @@ void Interpreter::hoistFunctions(const Block& block, const EnvPtr& env) {
     }
 }
 
-// The starting value of `name: type` without an initializer.
+// The starting value of `type name` without an initializer.
 Value Interpreter::zeroValue(const TypeSpec& type) {
     if (type.nullable) return Value();
     switch (type.kind) {
@@ -713,7 +713,7 @@ Interpreter::Flow Interpreter::execReturn(const ReturnStmt& stmt, const EnvPtr& 
         const TypeSpec& type = currentFunction_->returnType;
         if (type.kind == TypeKind::Void) {
             if (!value.isNull()) {
-                throw RuntimeError(functionLabel(currentFunction_->name) + " is declared '-> void', so it can't return a value");
+                throw RuntimeError(functionLabel(currentFunction_->name) + " returns void, so it can't return a value");
             }
         } else {
             Value converted;

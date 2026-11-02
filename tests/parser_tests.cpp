@@ -316,7 +316,7 @@ TEST(parser_bitwise_precedence) {
 }
 
 TEST(parser_typed_declarations) {
-    Parsed typed = parse("age: u8 = 30");
+    Parsed typed = parse("u8 age = 30");
     CHECK(typed.errors.empty());
     const auto& decl = onlyStatement(typed).as<DeclareStmt>();
     CHECK(decl.hasType);
@@ -324,25 +324,55 @@ TEST(parser_typed_declarations) {
     CHECK(decl.type.num == NumKind::U8);
     CHECK(decl.value != nullptr);
 
-    Parsed zero = parse("name: string?");
+    Parsed zero = parse("string? name");
     CHECK(zero.errors.empty());
     const auto& noValue = onlyStatement(zero).as<DeclareStmt>();
     CHECK(noValue.type.nullable);
     CHECK(noValue.value == nullptr);
 
-    Parsed constant = parse("const MAX: i64 = 10");
+    Parsed constant = parse("const i64 MAX = 10");
     CHECK(constant.errors.empty());
     CHECK(onlyStatement(constant).as<DeclareStmt>().constant);
     CHECK(parse("const LIMIT := 3").errors.empty());
 
-    CHECK(firstError("x: int32 = 1").find("unknown type 'int32'") == 0);
-    CHECK_EQ(firstError("x: void"), std::string("'void' can only be used as a return type"));
-    CHECK_EQ(firstError("x: i32 := 5"), std::string("use '=' after a type, like 'x: i32 = ...'"));
+    CHECK(firstError("int32 x = 1").find("unknown type 'int32'") == 0);
+    CHECK_EQ(firstError("void x"), std::string("'void' can only be used as a return type"));
+    CHECK_EQ(firstError("i32 x := 5"), std::string("use '=' in a typed declaration, like 'i32 x = ...'"));
     CHECK_EQ(firstError("const X"), std::string("a constant needs a value: 'const X = ...'"));
 }
 
+TEST(parser_old_style_types_get_a_hint) {
+    CHECK_EQ(firstError("age: u8 = 30"), std::string("write the type before the name, like 'u8 age = ...'"));
+    CHECK_EQ(firstError("const MAX: i64 = 1"), std::string("write the type before the name, like 'const i64 MAX = ...'"));
+    CHECK_EQ(firstError("func f(n: u8) { }"), std::string("write the parameter's type before its name, like 'u8 n'"));
+}
+
+TEST(parser_c_style_functions) {
+    Parsed parsed = parse("i32 add(i32 a, i32 b = 1) {\n  return a + b\n}");
+    CHECK(parsed.errors.empty());
+    CHECK(parsed.program->body.hasFunctions);
+    const auto& function = *onlyStatement(parsed).as<FunctionStmt>().function;
+    CHECK_EQ(function.name, std::string("add"));
+    CHECK_EQ(function.returnType.name(), std::string("i32"));
+    CHECK_EQ(function.params[0].type.name(), std::string("i32"));
+    CHECK_EQ(function.requiredParams, size_t(1));
+    CHECK(parse("void log(string message) { }").errors.empty());
+    CHECK(parse("string? find(list items, any target) { return null }").errors.empty());
+    CHECK_EQ(firstError("i32 f() -> i32 { }"), std::string("the return type is already written before the function name"));
+    // A type name followed by '(' is still a call: string(5), list(...) are conversions.
+    CHECK_EQ(expr("string(5)"), std::string("(call string 5)"));
+}
+
+TEST(parser_func_typed_variables) {
+    Parsed holder = parse("func handler = print");
+    CHECK(holder.errors.empty());
+    CHECK(onlyStatement(holder).kind == StmtKind::Declare);
+    CHECK(parse("func? callback").errors.empty());
+    CHECK(onlyStatement(parse("func greet() { }")).kind == StmtKind::Function);
+}
+
 TEST(parser_typed_functions) {
-    CHECK_EQ(expr("func(a: i32, b: string? = null) -> f64 { return 1.0 }"), std::string("(func a:i32 b:string? -> f64)"));
+    CHECK_EQ(expr("func(i32 a, string? b = null) -> f64 { return 1.0 }"), std::string("(func a:i32 b:string? -> f64)"));
     CHECK_EQ(expr("func() -> void { }"), std::string("(func -> void)"));
 }
 

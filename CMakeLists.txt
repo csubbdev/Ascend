@@ -10,6 +10,11 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# The sources and tests contain UTF-8 text; MSVC otherwise assumes the system code page.
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 # Everything except main() lives in a library so the tests can use it too.
 add_library(ascend_core STATIC
     src/error.cpp

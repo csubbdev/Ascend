@@ -17,7 +17,7 @@ namespace ascend {
 //   - `return` outside a function, or a return that doesn't match the
 //     function's declared return type
 //   - a function with two parameters of the same name
-//   - a literal that doesn't fit its declared type: `x: u8 = 300`
+//   - a literal that doesn't fit its declared type: `u8 x = 300`
 class SemanticAnalyzer {
 public:
     std::vector<Diagnostic> analyze(const Program& program);

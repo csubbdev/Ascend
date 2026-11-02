@@ -4,15 +4,17 @@
 
 ### New
 
-- **Optional types**: `name: type = value` declarations with `i8` `i16` `i32`
-  `i64` `u8` `u16` `u32` `u64` `byte` `int` `f32` `f64` `float` `bool` `char`
-  `string` `list` `map` `func` `any`, and nullable types like `string?`.
-  Typed variables reject values of the wrong type, and numbers that don't fit.
-  `name: type` without a value starts at the type's zero value.
+- **Optional C-style types**: `type name = value` declarations, like
+  `u8 age = 30`, with `i8` `i16` `i32` `i64` `u8` `u16` `u32` `u64` `byte`
+  `int` `f32` `f64` `float` `bool` `char` `string` `list` `map` `func` `any`,
+  and nullable types like `string?`. Typed variables reject values of the
+  wrong type, and numbers that don't fit. `type name` without a value starts
+  at the type's zero value.
 - Every number carries its type. Arithmetic stays in that type and reports
   overflow as an error (`250u8 + 10` fails instead of wrapping).
-- Typed function parameters and return types: `func f(a: i32) -> f64 { }`,
-  plus `-> void`.
+- C-style typed functions: `f64 area(f64 w, f64 h) { }` and
+  `void log(string message) { }`. Untyped functions still use `func`, and
+  anonymous functions can declare a return type with `func(i32 x) -> i32 { }`.
 - `const` declarations.
 - `match` statements.
 - f-strings with format specs: `f"{name:<10} {price:>8.2f}"`, and `format()`.
@@ -22,7 +24,7 @@
 - Bitwise operators `& | ^ ~ << >>` and their compound assignments.
 - Unicode strings: `len`, indexing, slicing and iteration count characters.
 - Modules: `import("file")` returns a file's top-level names as a map.
-- Type mismatches in literals (`x: u8 = 300`) and in `return` values are
+- Type mismatches in literals (`u8 x = 300`) and in `return` values are
   reported before the program runs.
 - New builtins: type conversions (`i8()` ... `u64()`, `f32()`, `f64()`,
   `char()`, `string()`, `byte()`), `format`, `hex`, `bin`, `chars`, `bytes`,
@@ -34,6 +36,8 @@
   `json_parse`, `json_stringify`, `clock`, `sleep`, `date`, `env`, `system`.
 - `ascend --check file.asc` reports errors without running the program.
 - Syntax highlighting for VS Code in `editors/vscode`.
+- GitHub Actions builds and tests every change on Linux, macOS and Windows,
+  and uploads the built interpreters.
 
 ### Changed (may affect existing programs)
 
