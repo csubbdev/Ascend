@@ -39,11 +39,13 @@ std::unique_ptr<T> nodeAt(const Token& token) {
 }  // namespace
 
 // Limits how deeply blocks and expressions may nest, so pathological input
-// produces an error instead of overflowing the stack.
+// produces an error instead of overflowing the stack. Both the nesting depth
+// and the real stack use are checked, since stack frames differ in size
+// between compilers.
 class Parser::NestingGuard {
 public:
     NestingGuard(Parser& parser, const Token& at) : parser_(parser) {
-        if (parser_.depth_ >= kMaxNesting) parser_.error(at, "code is nested too deeply");
+        if (parser_.depth_ >= kMaxNesting || parser_.stack_.exceeded()) parser_.error(at, "code is nested too deeply");
         ++parser_.depth_;
     }
     ~NestingGuard() { --parser_.depth_; }

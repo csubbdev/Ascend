@@ -4,6 +4,7 @@
 #include "ast.hpp"
 #include "error.hpp"
 #include "lexer.hpp"
+#include "stack_limit.hpp"
 
 #include <cstddef>
 #include <initializer_list>
@@ -104,6 +105,7 @@ private:
     std::vector<Diagnostic> errors_;
     bool incomplete_ = false;
     int depth_ = 0;
+    StackLimit stack_;
 };
 
 }  // namespace ascend

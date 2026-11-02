@@ -4,6 +4,7 @@
 #include "ast.hpp"
 #include "environment.hpp"
 #include "error.hpp"
+#include "stack_limit.hpp"
 #include "value.hpp"
 
 #include <cstddef>
@@ -138,8 +139,7 @@ private:
     bool replMode_ = false;
     int callDepth_ = 0;
     int maxCallDepth_;
-    uintptr_t stackBase_;
-    size_t stackBudget_;
+    StackLimit stack_;
 
     std::vector<std::weak_ptr<GcObject>> heap_;
     size_t nextCollection_;

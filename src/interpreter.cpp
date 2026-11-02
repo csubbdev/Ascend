@@ -5,6 +5,7 @@
 #include "parser.hpp"
 #include "runner.hpp"
 #include "semantic_analyzer.hpp"
+#include "stack_limit.hpp"
 #include "stdlib.hpp"
 #include "typecheck.hpp"
 #include "utf8.hpp"
@@ -17,19 +18,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <sys/resource.h>
-#endif
-#if defined(_MSC_VER)
-#include <intrin.h>
-#endif
 
 namespace ascend {
 
 namespace {
 
 constexpr int kDefaultMaxCallDepth = 100000;
-constexpr size_t kMiB = 1024 * 1024;
 constexpr size_t kMinCollectionThreshold = 10000;
 constexpr size_t kMaxRepeatSize = size_t(1) << 28;
 
@@ -173,32 +167,6 @@ std::string arityMessage(const std::string& name, size_t min, long long max, siz
 
 std::string functionLabel(const std::string& name) { return name.empty() ? "this function" : name + "()"; }
 
-// Address of the current stack frame, used to measure how much stack is in use.
-uintptr_t stackAddress() {
-#if defined(__GNUC__) || defined(__clang__)
-    return reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
-#elif defined(_MSC_VER)
-    return reinterpret_cast<uintptr_t>(_AddressOfReturnAddress());
-#else
-    volatile char marker = 0;
-    return reinterpret_cast<uintptr_t>(&marker);
-#endif
-}
-
-// How much stack the interpreter may use before reporting a stack overflow.
-// Leaves a safety margin below the real limit so the error can be reported
-// cleanly instead of crashing.
-size_t stackBudget() {
-    size_t total = 8 * kMiB;  // the default on Linux and macOS; CMake links Windows builds with 8 MB too
-#if defined(__unix__) || defined(__APPLE__)
-    struct rlimit limit;
-    if (getrlimit(RLIMIT_STACK, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY) {
-        total = static_cast<size_t>(limit.rlim_cur);
-    }
-#endif
-    return total > 2 * kMiB ? total - std::max(kMiB, total / 8) : total / 2;
-}
-
 bool isAbsolutePath(const std::string& path) {
     return (!path.empty() && (path[0] == '/' || path[0] == '\\')) || (path.size() > 1 && path[1] == ':');
 }
@@ -246,8 +214,6 @@ Interpreter::Interpreter(std::ostream& out, std::istream& in)
     : out_(out),
       in_(in),
       maxCallDepth_(kDefaultMaxCallDepth),
-      stackBase_(stackAddress()),
-      stackBudget_(stackBudget()),
       nextCollection_(kMinCollectionThreshold) {
     try {
         random_.seed(std::random_device{}());
@@ -368,9 +334,7 @@ void Interpreter::locate(RuntimeError& error, int line, int column) const {
 }
 
 void Interpreter::checkStack() const {
-    uintptr_t here = stackAddress();
-    size_t used = here > stackBase_ ? here - stackBase_ : stackBase_ - here;
-    if (used > stackBudget_) {
+    if (stack_.exceeded()) {
         throw RuntimeError("stack overflow: too much recursion (is there a recursive call without a base case?)");
     }
 }

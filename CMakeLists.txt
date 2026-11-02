@@ -22,6 +22,7 @@ add_library(ascend_core STATIC
     src/utf8.cpp
     src/numeric.cpp
     src/typecheck.cpp
+    src/stack_limit.cpp
     src/lexer.cpp
     src/parser.cpp
     src/semantic_analyzer.cpp
