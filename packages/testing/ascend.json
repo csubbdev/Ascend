@@ -1,0 +1,9 @@
+{
+  "name": "testing",
+  "version": "1.0.0",
+  "description": "Write and run unit tests for Ascend code",
+  "main": "testing.asc",
+  "dependencies": {
+    "colors": "*"
+  }
+}

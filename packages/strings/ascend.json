@@ -1,0 +1,7 @@
+{
+  "name": "strings",
+  "version": "1.0.0",
+  "description": "Case conversion, word wrapping, padding, edit distance and other text tools",
+  "main": "strings.asc",
+  "dependencies": {}
+}

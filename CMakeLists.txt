@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(ascend VERSION 0.3.0 LANGUAGES CXX)
+project(ascend VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,8 +33,16 @@ add_library(ascend_core STATIC
     src/json.cpp
     src/runner.cpp
     src/repl.cpp
+    src/process.cpp
+    src/packages.cpp
+    src/package_manager.cpp
 )
 target_include_directories(ascend_core PUBLIC src/include)
+
+# GCC 8 keeps std::filesystem in a separate library.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    target_link_libraries(ascend_core PUBLIC stdc++fs)
+endif()
 
 if(MSVC)
     target_compile_options(ascend_core PRIVATE /W4 /permissive-)
@@ -54,7 +62,12 @@ endfunction()
 add_executable(ascend src/main.cpp)
 target_link_libraries(ascend PRIVATE ascend_core)
 ascend_set_stack_size(ascend)
-install(TARGETS ascend RUNTIME DESTINATION bin)
+
+# The package manager.
+add_executable(apkg src/apkg_main.cpp)
+target_link_libraries(apkg PRIVATE ascend_core)
+
+install(TARGETS ascend apkg RUNTIME DESTINATION bin)
 
 option(ASCEND_BUILD_TESTS "Build the Ascend test suite" ON)
 if(ASCEND_BUILD_TESTS)
@@ -65,8 +78,11 @@ if(ASCEND_BUILD_TESTS)
         tests/lexer_tests.cpp
         tests/parser_tests.cpp
         tests/interpreter_tests.cpp
+        tests/package_tests.cpp
     )
     target_link_libraries(ascend_tests PRIVATE ascend_core)
+    # The package tests install the packages in this repository's registry.
+    target_compile_definitions(ascend_tests PRIVATE ASCEND_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     ascend_set_stack_size(ascend_tests)
     add_test(NAME unit_tests COMMAND ascend_tests)
 

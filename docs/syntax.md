@@ -366,6 +366,10 @@ geometry := import("geometry")
 print(geometry.circle_area(2))
 ```
 
+If there's no such file, `import` looks for an installed package with that
+name, so after `apkg install colors` you can write `import("colors")`. See
+[packages.md](packages.md).
+
 ## Errors
 
 Errors stop the program with a message that points at the problem:

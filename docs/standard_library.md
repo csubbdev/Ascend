@@ -145,7 +145,7 @@ Lengths and positions count characters, not bytes.
 
 | Function | Description |
 |----------|-------------|
-| `import(path)` | Runs another Ascend file once and returns its top-level names as a map. Relative paths start from the importing file; `.asc` is optional. |
+| `import(path)` | Runs another Ascend file once and returns its top-level names as a map. Relative paths start from the importing file; `.asc` is optional. If there's no such file, imports the installed package with that name (see [packages.md](packages.md)). |
 | `assert(condition, message?)` | Throws an error if `condition` is falsy. |
 | `exit(code?)` | Ends the program with exit code `code` (default 0). |
 | `args` | List of the extra command line arguments given after the script name. |

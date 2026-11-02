@@ -1,3 +1,5 @@
-# Build output (build/deleteme.txt keeps the folder in git)
-build/*
-!build/deleteme.txt
+# Build output
+build/
+
+# Packages installed by apkg
+ascend_packages/

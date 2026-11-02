@@ -1,0 +1,7 @@
+{
+  "name": "colors",
+  "version": "1.0.0",
+  "description": "Color and style text in the terminal",
+  "main": "colors.asc",
+  "dependencies": {}
+}
