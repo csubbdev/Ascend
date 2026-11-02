@@ -1,189 +1,99 @@
-#ifndef LEXER_HPP
-#define LEXER_HPP
+#ifndef ASCEND_LEXER_HPP
+#define ASCEND_LEXER_HPP
 
+#include "error.hpp"
+
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <vector>
 
-// token types
-enum class Token {
-    PRINT,
-    IF,
-    ELSE,
-    WHILE, 
-    BREAK,
-    CONTINUE,
-    TUPLE,
-    THROW,
-    TRY,
-    CATCH,
-    FINALLY,
-    PRIVATE,
-    PUBLIC,
-    PROTECTED,
-    UNDERSCORE,
-    HAS,
-    HASH,
-    ARROW,
-    TERNARY,
-    UNION,
-    SWITCH,
-    DEFAULT,
-    GOTO,
-    IMPORT,
-    DO, 
-    FOREACH, 
-    FOR, 
-    CASE, 
-    RETURN, 
-    RANGE,
-    DOTDOT,
-    IN,
-    FUNC, 
-    IDENTIFIER,
-    NUMBER,
-    ASSIGN,
-    ASSIGN_SIMPLE,
-    EQUALS,
-    NOT_EQUALS,
-    LESSER_THAN, 
-    GREATER_THAN, 
-    LESSER_THAN_OR_EQUAL, 
-    GREATER_THAN_OR_EQUAL,
-    AND,
-    OR,
-    NOT,
-    PLUS,
-    PLUS_ASSIGN,
-    MINUS,
-    MINUS_ASSIGN,
-    MULTIPLY,
-    MULTIPLY_ASSIGN,
-    DIVIDE,
-    DIVIDE_ASSIGN,
-    MODULO,
-    MODULO_ASSIGN,
-    LPAREN,
-    RPAREN,
-    COMMA,
-    COLON,
-    END,
-    ERROR,
-    INT,
-    FLOAT,
-    DOUBLE,
-    STATIC,
-    EXTENDS,
-    ABSTRACT,
-    LONG,
-    ULONG,
-    SHORT,
-    USHORT,
-    VOID,
-    BOOL,
-    ARRAY,
-    MAP,
-    ENUM,
-    NULLL,
-    CHAR,
-    STRING,
-    BYTES,
-    ADDITION_EQUAL,
-    INCREMENT,
-    DECREMENT,
-    QUESTION_MARK,
-    ASTERISK,
-    SUBTRACTION_EQUAL,
-    MULTIPLICATION_EQUAL,
-    DIVISION_EQUAL,
-    MODULUS_EQUAL,
-    DOUBLE_QUOTES,
-    SINGLE_QUOTES,
-    LINE_COMMENT,
-    BLOCK_COMMENT,
-    LSQBRACE,
-    RSQBRACE,
-    LBRACE,
-    RBRACE,
-    CONST,
-    STRUCT,
-    CLASS,
-    TYPEDEF,
-    SEMICOLON,
-    INVALID,
-    ESCAPE_SEQUENCE,
-    FALSE,
-    TRUE,
-    SYNCHRONIZED,
-    NEW,
-    VOLATILE,
-    CONDITIONAL_OPERATOR,
-    TIME,
-    DATE,
-    EOF_TOKEN
+namespace ascend {
+
+enum class TokenType {
+    // Punctuation
+    LeftParen, RightParen, LeftBracket, RightBracket, LeftBrace, RightBrace,
+    Comma, Dot, Colon, Semicolon, Question,
+
+    // Operators
+    Plus, Minus, Star, StarStar, Slash, Percent,
+    Equal, EqualEqual, NotEqual, Less, LessEqual, Greater, GreaterEqual,
+    Declare,  // :=
+    PlusEqual, MinusEqual, StarEqual, SlashEqual, PercentEqual,
+
+    // Literals
+    Identifier, Int, Float, String,
+
+    // Keywords. `&&`, `||` and `!` are lexed as And, Or and Not.
+    And, Or, Not,
+    If, Else, While, For, In, Break, Continue, Return, Func,
+    True, False, Null, Try, Catch, Throw,
+
+    // Structure
+    Newline, Eof
 };
 
-// convert token to string representation
-inline std::string tokenToString(Token t) {
-    switch (t) {
-        case Token::PRINT: return "PRINT";
-        case Token::SEMICOLON: return "SEMICOLON";
-        case Token::IF: return "IF";
-        case Token::IDENTIFIER: return "IDENTIFIER";
-        case Token::ASSIGN_SIMPLE: return "ASSIGN_SIMPLE";
-        case Token::ASSIGN: return "ASSIGN";
-        case Token::NUMBER: return "NUMBER";
-        case Token::PLUS: return "PLUS";
-        case Token::MINUS: return "MINUS";
-        case Token::MULTIPLY: return "MULTIPLY";
-        case Token::DIVIDE: return "DIVIDE";
-        case Token::MODULO: return "MODULO";
-        case Token::LPAREN: return "LPAREN";
-        case Token::RPAREN: return "RPAREN";
-        case Token::LSQBRACE: return "LSQBRACE";
-        case Token::RSQBRACE: return "RSQBRACE";
-        case Token::LBRACE: return "LBRACE";
-        case Token::RBRACE: return "RBRACE";
-        case Token::GREATER_THAN_OR_EQUAL: return "GREATER_THAN_OR_EQUAL";
-        case Token::LESSER_THAN_OR_EQUAL: return "LESSER_THAN_OR_EQUAL";
-        case Token::GREATER_THAN: return "GREATER_THAN";
-        case Token::LESSER_THAN: return "LESSER_THAN";
-        case Token::AND: return "AND";
-        case Token::OR: return "OR";
-        case Token::NOT: return "NOT";
-        case Token::RETURN: return "RETURN";
-        case Token::FUNC: return "FUNC";
-        case Token::END: return "END";
-        default: return "UNKNOWN";
-    }
-}
+struct Token {
+    TokenType type = TokenType::Eof;
+    std::string lexeme;     // the exact source text of the token
+    std::string text;       // decoded contents of a string literal
+    int64_t intValue = 0;   // value of an Int literal
+    double floatValue = 0;  // value of a Float literal
+    int line = 1;
+    int column = 1;
+};
 
+// Human readable description of a token for error messages, e.g. "'}'" or "end of line".
+std::string describeToken(const Token& token);
+
+// Turns source code into tokens.
+//
+// Newlines are significant (they end statements) except inside (...) and [...],
+// so long calls and lists can be split across lines. Inside {...} newlines are
+// kept, because braces delimit blocks of statements.
 class Lexer {
 public:
-    Lexer(const std::string &src);
-    
-    Token getNextToken();
-    char currentChar(); 
-    char peekChar();
-    void advance();
-    std::string getIdentifier();
-    int getNumber();
-    std::string getString();
-    int lineNumber;
-    int getLineNumber() { return lineNumber; }
-    
-    // add pos tracking methods
-    size_t getCurrentPosition() const { return index; }
-    void setPosition(size_t pos) { 
-        if (pos <= source.length()) {
-            index = pos;
-        }
-    }
+    explicit Lexer(std::string source);
+
+    std::vector<Token> tokenize();
+
+    const std::vector<Diagnostic>& errors() const { return errors_; }
+
+    // True if the source ended inside a /* block comment */. The REPL uses this
+    // to keep reading input instead of reporting an error.
+    bool endedInsideComment() const { return endedInsideComment_; }
 
 private:
-    std::string source;
-    size_t index;
-    int lastNumber;
-    std::string lastString;
-    std::string lastIdentifier;
+    char peek(size_t ahead = 0) const;
+    bool atEnd() const;
+    char advance();
+    bool match(char expected);
+
+    void skipTrivia();
+    void blockComment();
+    void scanToken();
+    void identifier();
+    void number();
+    void string(char quote);
+
+    void add(TokenType type);
+    void emitNewline();
+    void closeBracket();
+    void error(int line, int column, std::string message);
+
+    std::string source_;
+    std::vector<Token> tokens_;
+    std::vector<Diagnostic> errors_;
+    std::vector<char> brackets_;  // currently open (, [ and {
+    size_t pos_ = 0;
+    int line_ = 1;
+    int column_ = 1;
+    size_t start_ = 0;
+    int startLine_ = 1;
+    int startColumn_ = 1;
+    bool endedInsideComment_ = false;
 };
 
-#endif // LEXER_HPP
+}  // namespace ascend
+
+#endif  // ASCEND_LEXER_HPP

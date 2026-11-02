@@ -1,0 +1,3 @@
+# Build output (build/deleteme.txt keeps the folder in git)
+build/*
+!build/deleteme.txt
