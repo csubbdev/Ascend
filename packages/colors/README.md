@@ -7,7 +7,7 @@ apkg install colors
 ```
 
 ```
-colors := import("colors")
+import colors
 
 print(colors.green("passed"), colors.red("failed"))
 print(colors.style("Warning:", "bold yellow on_black"), "disk almost full")

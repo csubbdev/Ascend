@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(ascend VERSION 0.4.0 LANGUAGES CXX)
+project(ascend VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,12 +23,14 @@ add_library(ascend_core STATIC
     src/numeric.cpp
     src/typecheck.cpp
     src/stack_limit.cpp
+    src/big_stack.cpp
     src/lexer.cpp
     src/parser.cpp
     src/semantic_analyzer.cpp
     src/value.cpp
     src/interpreter.cpp
     src/stdlib.cpp
+    src/stdlib_extra.cpp
     src/format.cpp
     src/json.cpp
     src/runner.cpp
@@ -38,6 +40,10 @@ add_library(ascend_core STATIC
     src/package_manager.cpp
 )
 target_include_directories(ascend_core PUBLIC src/include)
+
+# The interpreter runs programs on a thread with a large stack.
+find_package(Threads REQUIRED)
+target_link_libraries(ascend_core PUBLIC Threads::Threads)
 
 # GCC 8 keeps std::filesystem in a separate library.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
@@ -78,6 +84,7 @@ if(ASCEND_BUILD_TESTS)
         tests/lexer_tests.cpp
         tests/parser_tests.cpp
         tests/interpreter_tests.cpp
+        tests/language_tests.cpp
         tests/package_tests.cpp
     )
     target_link_libraries(ascend_tests PRIVATE ascend_core)
@@ -92,4 +99,7 @@ if(ASCEND_BUILD_TESTS)
         get_filename_component(example_name ${example} NAME_WE)
         add_test(NAME example_${example_name} COMMAND ascend ${example})
     endforeach()
+
+    # `ascend test` finds and runs the test files among the examples.
+    add_test(NAME ascend_test_command COMMAND ascend test ${CMAKE_CURRENT_SOURCE_DIR}/examples)
 endif()

@@ -1,5 +1,7 @@
 #include "semantic_analyzer.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <unordered_set>
 
 namespace ascend {
@@ -7,14 +9,45 @@ namespace ascend {
 std::vector<Diagnostic> SemanticAnalyzer::analyze(const Program& program) {
     diagnostics_.clear();
     loopDepth_ = 0;
+    switchDepth_ = 0;
     functions_.clear();
+    typeUses_.clear();
+    declared_.clear();
+    importsEverything_ = false;
+    hasMain_ = false;
+    mentionsMain_ = false;
+    for (const auto& stmt : program.body.statements) {
+        if (stmt->kind == StmtKind::Function && stmt->as<FunctionStmt>().function->name == "main") hasMain_ = true;
+    }
     visitBlock(program.body);
+
+    // Struct types can be declared after they're used, or imported, so
+    // unknown type names are only reported now.
+    if (checkTypeNames && !importsEverything_) {
+        for (const auto& use : typeUses_) {
+            if (declared_.count(use.name) != 0) continue;
+            report(use.line, use.column,
+                   "unknown type '" + use.name +
+                       "' (the types are: i8 i16 i32 i64 u8 u16 u32 u64 int byte short long f32 f64 float double bool "
+                       "char string list map func any, and the structs you declare)");
+        }
+    }
+    std::stable_sort(diagnostics_.begin(), diagnostics_.end(), [](const Diagnostic& a, const Diagnostic& b) {
+        return a.line != b.line ? a.line < b.line : a.column < b.column;
+    });
     return diagnostics_;
+}
+
+void SemanticAnalyzer::noteType(const TypeSpec& type, int line, int column) {
+    if (type.kind == TypeKind::Struct) typeUses_.push_back({type.structName, line, column});
+    if (type.element) noteType(*type.element, line, column);
+    if (type.key) noteType(*type.key, line, column);
 }
 
 void SemanticAnalyzer::checkType(const Expr* expr, const TypeSpec& type,
                                  const std::function<std::string(const CoerceFailure&)>& describe) {
-    if (expr == nullptr || type.isAny()) return;
+    // Struct values are only made at run time (and the type may be unknown).
+    if (expr == nullptr || type.isAny() || type.kind == TypeKind::Struct) return;
     CoerceFailure failure;
     Value value;
     switch (expr->kind) {
@@ -25,8 +58,37 @@ void SemanticAnalyzer::checkType(const Expr* expr, const TypeSpec& type,
             }
             return;
         }
-        case ExprKind::List: value = Value::fromList(std::make_shared<ListObj>()); break;
-        case ExprKind::Map: value = Value::fromMap(std::make_shared<MapObj>()); break;
+        case ExprKind::List:
+            // list<u8> xs = [1, 300]: check each element that's known now.
+            if (type.kind == TypeKind::List && type.element) {
+                for (const auto& element : expr->as<ListExpr>().elements) {
+                    if (element->kind == ExprKind::Spread) continue;
+                    checkType(element.get(), *type.element, [&](const CoerceFailure& inner) {
+                        CoerceFailure outer;
+                        outer.what = "a list containing " + inner.what;
+                        outer.hint = inner.hint;
+                        return describe(outer);
+                    });
+                }
+                return;
+            }
+            value = Value::fromList(std::make_shared<ListObj>());
+            break;
+        case ExprKind::Map:
+            if (type.kind == TypeKind::Map && type.element) {
+                for (const auto& entry : expr->as<MapExpr>().entries) {
+                    if (!entry.second) continue;
+                    checkType(entry.second.get(), *type.element, [&](const CoerceFailure& inner) {
+                        CoerceFailure outer;
+                        outer.what = "a map containing " + inner.what;
+                        outer.hint = inner.hint;
+                        return describe(outer);
+                    });
+                }
+                return;
+            }
+            value = Value::fromMap(std::make_shared<MapObj>());
+            break;
         case ExprKind::FString: value = Value::fromString(""); break;
         case ExprKind::Function: {
             if (type.kind == TypeKind::Function) return;
@@ -56,7 +118,9 @@ void SemanticAnalyzer::visitStmt(const Stmt& stmt) {
             break;
         case StmtKind::Declare: {
             const auto& decl = stmt.as<DeclareStmt>();
+            declared_.insert(decl.name);
             visitExpr(decl.value.get());
+            noteType(decl.type, stmt.line, stmt.column);
             if (decl.hasType) {
                 if (!decl.value && decl.type.kind == TypeKind::Function && !decl.type.nullable) {
                     report(stmt.line, stmt.column,
@@ -99,14 +163,125 @@ void SemanticAnalyzer::visitStmt(const Stmt& stmt) {
             if (!loop.second.empty() && loop.first == loop.second) {
                 report(stmt.line, stmt.column, "both loop variables are named '" + loop.first + "'");
             }
+            noteType(loop.firstType, stmt.line, stmt.column);
+            noteType(loop.secondType, stmt.line, stmt.column);
             visitExpr(loop.iterable.get());
             ++loopDepth_;
             visitBlock(loop.body);
             --loopDepth_;
             break;
         }
+        case StmtKind::CFor: {
+            const auto& loop = stmt.as<CForStmt>();
+            for (const auto& init : loop.init) visitStmt(*init);
+            visitExpr(loop.condition.get());
+            for (const auto& step : loop.step) visitStmt(*step);
+            ++loopDepth_;
+            visitBlock(loop.body);
+            --loopDepth_;
+            break;
+        }
+        case StmtKind::Switch: {
+            const auto& choice = stmt.as<SwitchStmt>();
+            visitExpr(choice.subject.get());
+            for (const auto& entry : choice.cases) {
+                for (const auto& value : entry.values) visitExpr(value.get());
+            }
+            ++switchDepth_;
+            visitBlock(choice.body);
+            --switchDepth_;
+            break;
+        }
+        case StmtKind::Import: {
+            const auto& import = stmt.as<ImportStmt>();
+            if (import.all) importsEverything_ = true;
+            for (const auto& name : import.names) declared_.insert(name.binding);
+            break;
+        }
+        case StmtKind::Struct: {
+            const auto& declaration = stmt.as<StructStmt>();
+            declared_.insert(declaration.name);
+            if (!declaration.parent.empty()) typeUses_.push_back({declaration.parent, stmt.line, stmt.column});
+            std::set<std::string> seen;
+            for (const auto& field : declaration.fields) {
+                if (!seen.insert(field.name).second) {
+                    report(field.line, field.column,
+                           "struct " + declaration.name + " has two fields named '" + field.name + "'");
+                }
+                noteType(field.type, field.line, field.column);
+                visitExpr(field.defaultValue.get());
+                if (!field.defaultValue && field.type.kind == TypeKind::Function && !field.type.nullable) {
+                    report(field.line, field.column,
+                           "field '" + field.name + "' is declared as func, so it needs a default value (or declare it "
+                           "as func?)");
+                }
+                checkType(field.defaultValue.get(), field.type, [&](const CoerceFailure& failure) {
+                    return withHint("field '" + field.name + "' is declared as " + field.type.name() +
+                                        ", so its default can't be " + failure.what,
+                                    failure);
+                });
+            }
+            for (const auto& method : declaration.methods) {
+                const FunctionExpr& function = *method.second;
+                if (!seen.insert(method.first).second) {
+                    report(function.line, function.column,
+                           "struct " + declaration.name + " already has a field or method named '" + method.first + "'");
+                }
+                bool isOperator = method.first.size() > 8 && method.first.compare(0, 8, "operator") == 0 &&
+                                  !std::isalnum(static_cast<unsigned char>(method.first[8])) && method.first[8] != '_';
+                if (isOperator && function.params.size() != 2) {
+                    report(function.line, function.column,
+                           method.first + " takes one parameter: the value on the other side (or the index, for [])");
+                }
+                if ((method.first == "to_string" || method.first == "iter" || method.first == "len") &&
+                    function.params.size() != 1) {
+                    report(function.line, function.column, method.first + "() is called with no arguments, so it can't have parameters");
+                }
+                if (method.first == "init" && function.params.size() > 1) {
+                    report(function.line, function.column,
+                           "init() is called with no arguments when a " + declaration.name +
+                               " is made, so it can't have parameters");
+                }
+                visitFunction(function);
+            }
+            break;
+        }
+        case StmtKind::Enum: {
+            const auto& declaration = stmt.as<EnumStmt>();
+            declared_.insert(declaration.name);
+            std::set<std::string> seen;
+            for (const auto& member : declaration.members) {
+                if (!seen.insert(member.name).second) {
+                    report(member.line, member.column,
+                           "enum " + declaration.name + " lists '" + member.name + "' more than once");
+                }
+                visitExpr(member.value.get());
+            }
+            break;
+        }
+        case StmtKind::Group:
+            for (const auto& inner : stmt.as<GroupStmt>().statements) visitStmt(*inner);
+            break;
+        case StmtKind::MultiAssign: {
+            const auto& assign = stmt.as<MultiAssignStmt>();
+            std::set<std::string> seen;
+            for (const auto& target : assign.targets) {
+                visitExpr(target.get());
+                if (target->kind == ExprKind::Variable) {
+                    const std::string& name = target->as<VariableExpr>().name;
+                    if (assign.declare) declared_.insert(name);
+                    if (!seen.insert(name).second) {
+                        report(target->line, target->column, "'" + name + "' is listed twice");
+                    }
+                }
+            }
+            for (const auto& value : assign.values) visitExpr(value.get());
+            break;
+        }
         case StmtKind::Break:
-            if (loopDepth_ == 0) report(stmt.line, stmt.column, "'break' can only be used inside a loop");
+            if (loopDepth_ == 0 && switchDepth_ == 0) {
+                report(stmt.line, stmt.column, "'break' can only be used inside a loop or switch");
+            }
             break;
         case StmtKind::Continue:
             if (loopDepth_ == 0) report(stmt.line, stmt.column, "'continue' can only be used inside a loop");
@@ -133,12 +308,14 @@ void SemanticAnalyzer::visitStmt(const Stmt& stmt) {
             break;
         }
         case StmtKind::Function:
+            declared_.insert(stmt.as<FunctionStmt>().function->name);
             visitFunction(*stmt.as<FunctionStmt>().function);
             break;
         case StmtKind::Try: {
             const auto& tryStmt = stmt.as<TryStmt>();
             visitBlock(tryStmt.body);
             visitBlock(tryStmt.handler);
+            visitBlock(tryStmt.finallyBody);
             break;
         }
         case StmtKind::Throw:
@@ -160,7 +337,26 @@ void SemanticAnalyzer::visitExpr(const Expr* expr) {
     if (expr == nullptr) return;
     switch (expr->kind) {
         case ExprKind::Literal:
+            break;
         case ExprKind::Variable:
+            if (expr->as<VariableExpr>().name == "main") mentionsMain_ = true;
+            break;
+        case ExprKind::IncDec:
+            visitExpr(expr->as<IncDecExpr>().target.get());
+            break;
+        case ExprKind::Comprehension: {
+            const auto& comprehension = expr->as<ComprehensionExpr>();
+            for (const auto& clause : comprehension.clauses) visitExpr(clause.expr.get());
+            visitExpr(comprehension.key.get());
+            visitExpr(comprehension.value.get());
+            break;
+        }
+        case ExprKind::Range:
+            visitExpr(expr->as<RangeExpr>().start.get());
+            visitExpr(expr->as<RangeExpr>().end.get());
+            break;
+        case ExprKind::Spread:
+            visitExpr(expr->as<SpreadExpr>().value.get());
             break;
         case ExprKind::Unary:
             visitExpr(expr->as<UnaryExpr>().operand.get());
@@ -220,10 +416,12 @@ void SemanticAnalyzer::visitExpr(const Expr* expr) {
 
 void SemanticAnalyzer::visitFunction(const FunctionExpr& function) {
     std::unordered_set<std::string> seen;
+    noteType(function.returnType, function.line, function.column);
     for (const auto& param : function.params) {
         if (!seen.insert(param.name).second) {
             report(function.line, function.column, "parameter '" + param.name + "' is listed more than once");
         }
+        noteType(param.type, function.line, function.column);
         visitExpr(param.defaultValue.get());
         checkType(param.defaultValue.get(), param.type, [&](const CoerceFailure& failure) {
             return withHint("parameter '" + param.name + "' is declared as " + param.type.name() +
@@ -233,11 +431,14 @@ void SemanticAnalyzer::visitFunction(const FunctionExpr& function) {
     }
     // A loop outside the function doesn't make `break` valid inside it.
     int savedLoopDepth = loopDepth_;
+    int savedSwitchDepth = switchDepth_;
     loopDepth_ = 0;
+    switchDepth_ = 0;
     functions_.push_back(&function);
     visitBlock(function.body);
     functions_.pop_back();
     loopDepth_ = savedLoopDepth;
+    switchDepth_ = savedSwitchDepth;
 }
 
 }  // namespace ascend

@@ -2,6 +2,7 @@
 
 #include "interpreter.hpp"
 #include "numeric.hpp"
+#include "typecheck.hpp"
 #include "utf8.hpp"
 
 #include <algorithm>
@@ -12,9 +13,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <random>
+#include <regex>
 #include <string>
 #include <thread>
 
@@ -243,6 +246,202 @@ std::string padText(const Args& args, const char* fn, bool left) {
     return left ? padding + text : text + padding;
 }
 
+// Structs always have all their fields, and enums never change.
+void checkResizable(const MapObj& map, const char* fn) {
+    if (map.structInfo()) throw RuntimeError(std::string(fn) + "() can't remove fields from a " + map.structInfo()->name);
+    if (!map.frozenAs.empty()) throw RuntimeError(std::string(fn) + "(): the members of " + map.frozenAs + " can't be changed");
+}
+
+// printf("%-10s %5.2f\n", name, price): C format strings.
+//   %d %i %u  integer        %f %e %g  float (%F %E %G)     %x %X %o %b  hex, octal, binary
+//   %c  char (or a character code)     %s  any value as text  %%  a percent sign
+// with C flags (- + space 0 #), width and precision, which may be * (taken
+// from the arguments). Length modifiers like l and ll are accepted and ignored.
+std::string cFormat(const char* fn, const Args& args) {
+    const std::string& format = stringArg(args, 0, fn);
+    const std::string name = fn;
+    size_t next = 1;
+    auto nextArg = [&](const std::string& conversion) -> const Value& {
+        if (next >= args.size()) {
+            throw RuntimeError(name + "(): the format has more conversions than values (no value for " + conversion + ")");
+        }
+        return args[next++];
+    };
+
+    std::string out;
+    for (size_t i = 0; i < format.size(); ++i) {
+        if (format[i] != '%') {
+            out += format[i];
+            continue;
+        }
+        size_t start = i++;
+        if (i < format.size() && format[i] == '%') {
+            out += '%';
+            continue;
+        }
+        bool left = false, plus = false, space = false, zero = false, alternate = false;
+        for (; i < format.size(); ++i) {
+            char flag = format[i];
+            if (flag == '-') left = true;
+            else if (flag == '+') plus = true;
+            else if (flag == ' ') space = true;
+            else if (flag == '0') zero = true;
+            else if (flag == '#') alternate = true;
+            else break;
+        }
+        int64_t width = 0;
+        if (i < format.size() && format[i] == '*') {
+            const Value& value = nextArg("*");
+            if (!value.isInt() || !toInt64(value, width)) throw RuntimeError(name + "(): a * width needs an integer");
+            if (width < 0) {
+                left = true;
+                width = -width;
+            }
+            ++i;
+        } else {
+            while (i < format.size() && std::isdigit(static_cast<unsigned char>(format[i]))) {
+                width = width * 10 + (format[i++] - '0');
+                if (width > 10000) throw RuntimeError(name + "(): width is too large");
+            }
+        }
+        int64_t precision = -1;
+        if (i < format.size() && format[i] == '.') {
+            ++i;
+            precision = 0;
+            if (i < format.size() && format[i] == '*') {
+                const Value& value = nextArg("*");
+                if (!value.isInt() || !toInt64(value, precision)) throw RuntimeError(name + "(): a * precision needs an integer");
+                if (precision < 0) precision = -1;
+                ++i;
+            } else {
+                while (i < format.size() && std::isdigit(static_cast<unsigned char>(format[i]))) {
+                    precision = precision * 10 + (format[i++] - '0');
+                    if (precision > 100) throw RuntimeError(name + "(): precision is too large");
+                }
+            }
+        }
+        while (i < format.size() && std::string("hlLjzt").find(format[i]) != std::string::npos) ++i;
+        if (i >= format.size()) {
+            throw RuntimeError(name + "(): the format ends in the middle of '" + format.substr(start) +
+                               "' (write %% for a percent sign)");
+        }
+        const char conversion = format[i];
+        const std::string written = format.substr(start, i - start + 1);
+        const Value& value = nextArg(written);
+
+        std::string text;
+        bool numeric = true;
+        std::string prefix;
+        switch (conversion) {
+            case 'd':
+            case 'i':
+            case 'u':
+            case 'x':
+            case 'X':
+            case 'o':
+            case 'b': {
+                Value number = value;
+                if (value.isChar()) number = Value::fromInt(static_cast<int64_t>(value.asChar()));
+                if (value.isBool()) number = Value::fromInt(value.asBool() ? 1 : 0);
+                if (!number.isInt()) {
+                    throw RuntimeError(name + "(): " + written + " needs an integer, but got " +
+                                       (value.isFloat() ? toString(value) + " (use %f for floats, or int(...) to drop the "
+                                                                            "fraction)"
+                                                        : aTypeName(value)));
+                }
+                char type = conversion == 'i' || conversion == 'u' ? 'd' : conversion;
+                text = formatValue(number, std::string(plus ? "+" : space ? " " : "") + type);
+                if (alternate && !(number.isInt() && number.asInt() == 0)) {
+                    if (type == 'x') prefix = "0x";
+                    if (type == 'X') prefix = "0X";
+                    if (type == 'o') prefix = "0";
+                    if (type == 'b') prefix = "0b";
+                }
+                break;
+            }
+            case 'f':
+            case 'F':
+            case 'e':
+            case 'E':
+            case 'g':
+            case 'G': {
+                if (!value.isNumber()) {
+                    throw RuntimeError(name + "(): " + written + " needs a number, but got " + aTypeName(value));
+                }
+                std::string spec = std::string(plus ? "+" : space ? " " : "") + "." +
+                                   std::to_string(precision >= 0 ? precision : 6) + conversion;
+                text = formatValue(value, spec);
+                break;
+            }
+            case 'c':
+                numeric = false;
+                text = formatValue(value, "c");
+                break;
+            case 's':
+                numeric = false;
+                text = toString(value);
+                if (precision >= 0 && utf8Length(text) > static_cast<size_t>(precision)) {
+                    text = text.substr(0, utf8Offset(text, static_cast<size_t>(precision)));
+                }
+                break;
+            default:
+                throw RuntimeError(name + "(): unknown conversion '" + written +
+                                   "' (use %d, %f, %s, %c, %x, %o, %e, %g or %%)");
+        }
+
+        // Pad to the width: spaces on the left (or right with -), or zeros
+        // after the sign and prefix with 0.
+        std::string sign;
+        if (numeric && !text.empty() && (text[0] == '-' || text[0] == '+' || text[0] == ' ')) {
+            sign = text.substr(0, 1);
+            text = text.substr(1);
+        }
+        size_t length = sign.size() + prefix.size() + utf8Length(text);
+        size_t padding = static_cast<size_t>(width) > length ? static_cast<size_t>(width) - length : 0;
+        if (left) {
+            out += sign + prefix + text + std::string(padding, ' ');
+        } else if (zero && numeric) {
+            out += sign + prefix + std::string(padding, '0') + text;
+        } else {
+            out += std::string(padding, ' ') + sign + prefix + text;
+        }
+    }
+    if (next < args.size()) {
+        throw RuntimeError(name + "(): " + std::to_string(args.size() - 1) + " values were given, but the format only uses " +
+                           std::to_string(next - 1));
+    }
+    return out;
+}
+
+std::regex compileRegex(const Args& args, size_t i, const char* fn) {
+    const std::string& pattern = stringArg(args, i, fn);
+    try {
+        return std::regex(pattern, std::regex::ECMAScript);
+    } catch (const std::regex_error& error) {
+        throw RuntimeError(std::string(fn) + "(): invalid regular expression \"" + pattern + "\": " + error.what());
+    }
+}
+
+// Runs a regex operation, turning the library's errors (e.g. a pattern too
+// complex for the text) into Ascend errors.
+template <typename F>
+auto withRegex(const char* fn, F body) -> decltype(body()) {
+    try {
+        return body();
+    } catch (const std::regex_error& error) {
+        throw RuntimeError(std::string(fn) + "(): " + error.what());
+    }
+}
+
+// The whole match and each group, as strings (null for groups that didn't match).
+Value matchGroups(Interpreter& in, const std::smatch& match) {
+    std::vector<Value> groups;
+    for (size_t g = 0; g < match.size(); ++g) {
+        groups.push_back(match[g].matched ? Value::fromString(match[g].str()) : Value());
+    }
+    return Value::fromList(in.newList(std::move(groups)));
+}
+
 // ---------------------------------------------------------------------------
 // Builtins
 
@@ -266,14 +465,29 @@ void registerCore(Interpreter& interp) {
         return Value::fromString(line);
     });
 
-    interp.defineNative("type", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(args[0].typeName()); });
+    interp.defineNative("type", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(typeNameOf(args[0])); });
     interp.defineNative("str", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(toString(args[0])); });
     interp.defineNative("string", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(toString(args[0])); });
     interp.defineNative("repr", 1, 1, [](Interpreter&, Args& args) { return Value::fromString(toRepr(args[0])); });
     interp.defineNative("bool", 1, 1, [](Interpreter&, Args& args) { return Value::fromBool(args[0].truthy()); });
 
-    interp.defineNative("len", 1, 1, [](Interpreter&, Args& args) {
+    interp.defineNative("is_a", 2, 2, [](Interpreter&, Args& args) {
+        // is_a(value, Point) or is_a(value, "Point"): true for the struct and the structs it extends.
+        std::string type;
+        if (args[1].isString()) {
+            type = args[1].asString();
+        } else if (args[1].isFunction() && args[1].asFunction().kind == Callable::Kind::Struct) {
+            type = static_cast<const StructType&>(args[1].asFunction()).info->name;
+        } else {
+            typeError("is_a", 1, "a struct or a type name", args[1]);
+        }
+        const StructInfo* info = args[0].isMap() ? args[0].asMap().structInfo() : nullptr;
+        return Value::fromBool(info != nullptr ? info->isA(type) : typeNameOf(args[0]) == type);
+    });
+
+    interp.defineNative("len", 1, 1, [](Interpreter& in, Args& args) {
         const Value& value = args[0];
+        if (const Value* method = structMethod(value, "len")) return in.call(*method, {value});
         switch (value.type()) {
             case Value::Type::String: return Value::fromInt(static_cast<int64_t>(utf8Length(value.asString())));
             case Value::Type::List: return Value::fromInt(static_cast<int64_t>(value.asList().items.size()));
@@ -310,6 +524,15 @@ void registerCore(Interpreter& interp) {
         return in.importModule(stringArg(args, 0, "import"));
     });
 
+    interp.defineNative("printf", 1, -1, [](Interpreter& in, Args& args) {
+        in.out() << cFormat("printf", args);
+        return Value();
+    });
+
+    interp.defineNative("sprintf", 1, -1, [](Interpreter&, Args& args) {
+        return Value::fromString(cFormat("sprintf", args));
+    });
+
     interp.defineNative("format", 1, -1, [](Interpreter&, Args& args) {
         return Value::fromString(formatTemplate(stringArg(args, 0, "format"), args, 1));
     });
@@ -323,7 +546,7 @@ void registerConversions(Interpreter& interp) {
     static const IntConversion intConversions[] = {
         {"int", NumKind::Int}, {"i8", NumKind::I8},   {"i16", NumKind::I16}, {"i32", NumKind::I32},
         {"i64", NumKind::I64}, {"u8", NumKind::U8},   {"u16", NumKind::U16}, {"u32", NumKind::U32},
-        {"u64", NumKind::U64}, {"byte", NumKind::U8},
+        {"u64", NumKind::U64}, {"byte", NumKind::U8},  {"long", NumKind::I64}, {"short", NumKind::I16},
     };
     for (const auto& conversion : intConversions) {
         const char* name = conversion.name;
@@ -336,7 +559,7 @@ void registerConversions(Interpreter& interp) {
         NumKind kind;
     };
     static const FloatConversion floatConversions[] = {
-        {"float", NumKind::Float}, {"f32", NumKind::F32}, {"f64", NumKind::F64}};
+        {"float", NumKind::Float}, {"f32", NumKind::F32}, {"f64", NumKind::F64}, {"double", NumKind::F64}};
     for (const auto& conversion : floatConversions) {
         const char* name = conversion.name;
         NumKind kind = conversion.kind;
@@ -377,8 +600,10 @@ void registerConversions(Interpreter& interp) {
 
 void registerCollections(Interpreter& interp) {
     interp.defineNative("push", 2, -1, [](Interpreter&, Args& args) {
-        auto& items = listArg(args, 0, "push").items;
-        for (size_t i = 1; i < args.size(); ++i) items.push_back(args[i]);
+        ListObj& list = listArg(args, 0, "push");
+        std::vector<Value> added;
+        for (size_t i = 1; i < args.size(); ++i) added.push_back(checkListItem(list, args[i]));
+        list.items.insert(list.items.end(), added.begin(), added.end());
         return Value();
     });
 
@@ -399,12 +624,13 @@ void registerCollections(Interpreter& interp) {
         if (index < 0 || index > size) {
             throw RuntimeError("insert() index " + toString(args[1]) + " is out of range (length " + std::to_string(size) + ")");
         }
-        items.insert(items.begin() + index, args[2]);
+        items.insert(items.begin() + index, checkListItem(args[0].asList(), args[2]));
         return Value();
     });
 
     interp.defineNative("remove", 2, 2, [](Interpreter&, Args& args) {
         if (args[0].isMap()) {
+            checkResizable(args[0].asMap(), "remove");
             Value removed;
             if (!args[0].asMap().remove(args[1], &removed)) {
                 throw RuntimeError("remove(): key " + toRepr(args[1]) + " not found in map");
@@ -419,14 +645,17 @@ void registerCollections(Interpreter& interp) {
     });
 
     interp.defineNative("extend", 2, 2, [](Interpreter&, Args& args) {
-        auto& items = listArg(args, 0, "extend").items;
+        ListObj& list = listArg(args, 0, "extend");
+        auto& items = list.items;
         std::vector<Value> more = listArg(args, 1, "extend").items;  // copy: extending a list with itself is fine
+        for (auto& item : more) item = checkListItem(list, std::move(item));
         items.insert(items.end(), more.begin(), more.end());
         return Value();
     });
 
     interp.defineNative("clear", 1, 1, [](Interpreter&, Args& args) {
         if (args[0].isMap()) {
+            checkResizable(args[0].asMap(), "clear");
             args[0].asMap().clearReferences();
         } else {
             listArg(args, 0, "clear").items.clear();
@@ -499,6 +728,87 @@ void registerCollections(Interpreter& interp) {
         }
         return Value::fromList(in.newList(std::move(items)));
     });
+
+    interp.defineNative("count_by", 2, 2, [](Interpreter& in, Args& args) {
+        std::vector<Value> items = listArg(args, 0, "count_by").items;
+        const Value& key = functionArg(args, 1, "count_by");
+        auto counts = in.newMap();
+        for (const Value& item : items) {
+            Value group = in.call(key, {item});
+            Value* existing = counts->find(group);
+            if (existing != nullptr) {
+                *existing = Value::fromInt(existing->asInt() + 1);
+            } else {
+                counts->set(group, Value::fromInt(1));
+            }
+        }
+        return Value::fromMap(counts);
+    });
+
+    interp.defineNative("group_by", 2, 2, [](Interpreter& in, Args& args) {
+        std::vector<Value> items = listArg(args, 0, "group_by").items;
+        const Value& key = functionArg(args, 1, "group_by");
+        auto groups = in.newMap();
+        for (const Value& item : items) {
+            Value group = in.call(key, {item});
+            Value* existing = groups->find(group);
+            if (existing != nullptr) {
+                existing->asList().items.push_back(item);
+            } else {
+                groups->set(group, Value::fromList(in.newList({item})));
+            }
+        }
+        return Value::fromMap(groups);
+    });
+
+    interp.defineNative("chunk", 2, 2, [](Interpreter& in, Args& args) {
+        std::vector<Value> items = listArg(args, 0, "chunk").items;
+        int64_t size = intArg(args, 1, "chunk");
+        if (size < 1) throw RuntimeError("chunk() size must be at least 1");
+        std::vector<Value> chunks;
+        for (size_t i = 0; i < items.size(); i += static_cast<size_t>(size)) {
+            size_t end = std::min(items.size(), i + static_cast<size_t>(size));
+            chunks.push_back(Value::fromList(in.newList(std::vector<Value>(items.begin() + static_cast<std::ptrdiff_t>(i),
+                                                                           items.begin() + static_cast<std::ptrdiff_t>(end)))));
+        }
+        return Value::fromList(in.newList(std::move(chunks)));
+    });
+
+    interp.defineNative("flat_map", 2, 2, [](Interpreter& in, Args& args) {
+        std::vector<Value> items = listArg(args, 0, "flat_map").items;
+        const Value& fn = functionArg(args, 1, "flat_map");
+        std::vector<Value> result;
+        for (const Value& item : items) {
+            Value mapped = in.call(fn, {item});
+            if (mapped.isList()) {
+                const auto& inner = mapped.asList().items;
+                result.insert(result.end(), inner.begin(), inner.end());
+            } else {
+                result.push_back(std::move(mapped));
+            }
+        }
+        return Value::fromList(in.newList(std::move(result)));
+    });
+
+    auto extremeBy = [](const char* name, int sign) {
+        return [name, sign](Interpreter& in, Args& args) {
+            std::vector<Value> items = listArg(args, 0, name).items;
+            const Value& key = functionArg(args, 1, name);
+            if (items.empty()) throw RuntimeError(std::string(name) + "() of an empty list");
+            Value best = items[0];
+            Value bestKey = in.call(key, {best});
+            for (size_t i = 1; i < items.size(); ++i) {
+                Value candidate = in.call(key, {items[i]});
+                if (compareValues(candidate, bestKey) * sign > 0) {
+                    best = items[i];
+                    bestKey = std::move(candidate);
+                }
+            }
+            return best;
+        };
+    };
+    interp.defineNative("min_by", 2, 2, extremeBy("min_by", -1));
+    interp.defineNative("max_by", 2, 2, extremeBy("max_by", 1));
 
     interp.defineNative("unique", 1, 1, [](Interpreter& in, Args& args) {
         std::vector<Value> result;
@@ -587,10 +897,17 @@ void registerCollections(Interpreter& interp) {
     });
 
     interp.defineNative("copy", 1, 1, [](Interpreter& in, Args& args) {
-        if (args[0].isList()) return Value::fromList(in.newList(args[0].asList().items));
+        if (args[0].isList()) {
+            auto copy = in.newList(args[0].asList().items);
+            copy->elementType = args[0].asList().elementType;
+            return Value::fromList(copy);
+        }
         if (args[0].isMap()) {
             auto copy = in.newMap();
             for (const auto& entry : args[0].asMap().entries) copy->set(entry.first, entry.second);
+            copy->structType = args[0].asMap().structType;  // a copy of a struct is the same kind of struct
+            copy->keyType = args[0].asMap().keyType;
+            copy->valueType = args[0].asMap().valueType;
             return Value::fromMap(copy);
         }
         return args[0];
@@ -847,6 +1164,36 @@ void registerMath(Interpreter& interp) {
         return total;
     });
 
+    // The numbers of a list as doubles, for mean() and median().
+    auto numbers = [](const Args& args, const char* name) {
+        const auto& items = listArg(args, 0, name).items;
+        if (items.empty()) throw RuntimeError(std::string(name) + "() of an empty list");
+        std::vector<double> values;
+        values.reserve(items.size());
+        for (const Value& item : items) {
+            if (!item.isNumber()) {
+                throw RuntimeError(std::string(name) + "() needs a list of numbers, but it contains " + article(item));
+            }
+            values.push_back(item.toDouble());
+        }
+        return values;
+    };
+
+    interp.defineNative("mean", 1, 1, [numbers](Interpreter&, Args& args) {
+        std::vector<double> values = numbers(args, "mean");
+        double total = 0;
+        for (double value : values) total += value;
+        return Value::fromFloat(total / static_cast<double>(values.size()));
+    });
+
+    interp.defineNative("median", 1, 1, [numbers](Interpreter&, Args& args) {
+        std::vector<double> values = numbers(args, "median");
+        std::sort(values.begin(), values.end());
+        size_t middle = values.size() / 2;
+        double result = values.size() % 2 == 1 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+        return Value::fromFloat(result);
+    });
+
     interp.defineNative("sign", 1, 1, [](Interpreter&, Args& args) {
         numberArg(args, 0, "sign");
         if (args[0].isFloat() && std::isnan(args[0].asFloat())) return args[0];
@@ -1062,6 +1409,81 @@ void registerFiles(Interpreter& interp) {
         if (indent < 0 || indent > 16) throw RuntimeError("json_stringify() indent must be from 0 to 16");
         return Value::fromString(jsonStringify(args[0], static_cast<int>(indent)));
     });
+
+    interp.defineNative("is_dir", 1, 1, [](Interpreter&, Args& args) {
+        std::error_code ignored;
+        return Value::fromBool(std::filesystem::is_directory(stringArg(args, 0, "is_dir"), ignored));
+    });
+
+    interp.defineNative("make_dir", 1, 1, [](Interpreter&, Args& args) {
+        const std::string& path = stringArg(args, 0, "make_dir");
+        std::error_code error;
+        bool created = std::filesystem::create_directories(path, error);
+        if (error) throw RuntimeError("make_dir(): can't create '" + path + "': " + error.message());
+        return Value::fromBool(created);
+    });
+
+    interp.defineNative("list_dir", 0, 1, [](Interpreter& in, Args& args) {
+        std::string path = args.empty() ? "." : stringArg(args, 0, "list_dir");
+        std::error_code error;
+        std::vector<std::string> names;
+        for (std::filesystem::directory_iterator it(path, error), end; !error && it != end; it.increment(error)) {
+            names.push_back(it->path().filename().string());
+        }
+        if (error) throw RuntimeError("list_dir(): can't read the folder '" + path + "': " + error.message());
+        std::sort(names.begin(), names.end());
+        std::vector<Value> items;
+        for (auto& name : names) items.push_back(Value::fromString(std::move(name)));
+        return Value::fromList(in.newList(std::move(items)));
+    });
+}
+
+void registerRegex(Interpreter& interp) {
+    interp.defineNative("regex_match", 2, 2, [](Interpreter&, Args& args) {
+        std::regex pattern = compileRegex(args, 1, "regex_match");
+        const std::string& text = stringArg(args, 0, "regex_match");
+        return withRegex("regex_match", [&] { return Value::fromBool(std::regex_match(text, pattern)); });
+    });
+
+    interp.defineNative("regex_search", 2, 2, [](Interpreter& in, Args& args) {
+        std::regex pattern = compileRegex(args, 1, "regex_search");
+        const std::string& text = stringArg(args, 0, "regex_search");
+        return withRegex("regex_search", [&] {
+            std::smatch match;
+            return std::regex_search(text, match, pattern) ? matchGroups(in, match) : Value();
+        });
+    });
+
+    interp.defineNative("regex_find_all", 2, 2, [](Interpreter& in, Args& args) {
+        std::regex pattern = compileRegex(args, 1, "regex_find_all");
+        const std::string& text = stringArg(args, 0, "regex_find_all");
+        return withRegex("regex_find_all", [&] {
+            std::vector<Value> found;
+            for (std::sregex_iterator it(text.begin(), text.end(), pattern), end; it != end; ++it) {
+                found.push_back(Value::fromString(it->str()));
+            }
+            return Value::fromList(in.newList(std::move(found)));
+        });
+    });
+
+    interp.defineNative("regex_replace", 3, 3, [](Interpreter&, Args& args) {
+        std::regex pattern = compileRegex(args, 1, "regex_replace");
+        const std::string& text = stringArg(args, 0, "regex_replace");
+        const std::string& replacement = stringArg(args, 2, "regex_replace");
+        return withRegex("regex_replace", [&] { return Value::fromString(std::regex_replace(text, pattern, replacement)); });
+    });
+
+    interp.defineNative("regex_split", 2, 2, [](Interpreter& in, Args& args) {
+        std::regex pattern = compileRegex(args, 1, "regex_split");
+        const std::string& text = stringArg(args, 0, "regex_split");
+        return withRegex("regex_split", [&] {
+            std::vector<Value> parts;
+            for (std::sregex_token_iterator it(text.begin(), text.end(), pattern, -1), end; it != end; ++it) {
+                parts.push_back(Value::fromString(it->str()));
+            }
+            return Value::fromList(in.newList(std::move(parts)));
+        });
+    });
 }
 
 }  // namespace
@@ -1106,6 +1528,8 @@ void registerStandardLibrary(Interpreter& interpreter) {
     registerMath(interpreter);
     registerSystem(interpreter);
     registerFiles(interpreter);
+    registerRegex(interpreter);
+    registerExtraLibrary(interpreter);
 }
 
 }  // namespace ascend

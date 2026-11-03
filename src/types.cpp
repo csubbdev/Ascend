@@ -77,9 +77,10 @@ std::string TypeSpec::name() const {
         case TypeKind::Number: text = numKindName(num); break;
         case TypeKind::Char: text = "char"; break;
         case TypeKind::String: text = "string"; break;
-        case TypeKind::List: text = "list"; break;
-        case TypeKind::Map: text = "map"; break;
+        case TypeKind::List: text = element ? "list<" + element->name() + ">" : "list"; break;
+        case TypeKind::Map: text = element ? "map<" + key->name() + ", " + element->name() + ">" : "map"; break;
         case TypeKind::Function: text = "func"; break;
+        case TypeKind::Struct: text = structName; break;
     }
     if (nullable) text += '?';
     return text;
@@ -110,12 +111,32 @@ bool lookupType(const std::string& name, TypeSpec& out) {
             {"list", simple(TypeKind::List)},  {"map", simple(TypeKind::Map)},
             {"func", simple(TypeKind::Function)}, {"any", simple(TypeKind::Any)},
             {"void", simple(TypeKind::Void)},
+            // C names for some of the types above.
+            {"double", number(NumKind::F64)},  {"long", number(NumKind::I64)},
+            {"short", number(NumKind::I16)},
         };
     }();
     auto it = types.find(name);
     if (it == types.end()) return false;
     out = it->second;
     return true;
+}
+
+bool sameType(const TypeSpec& a, const TypeSpec& b) {
+    if (a.kind != b.kind || a.nullable != b.nullable) return false;
+    if (a.kind == TypeKind::Number && a.num != b.num) return false;
+    if (a.kind == TypeKind::Struct && a.structName != b.structName) return false;
+    if ((a.element == nullptr) != (b.element == nullptr) || (a.key == nullptr) != (b.key == nullptr)) return false;
+    if (a.element && !sameType(*a.element, *b.element)) return false;
+    if (a.key && !sameType(*a.key, *b.key)) return false;
+    return true;
+}
+
+TypeSpec structType(const std::string& name) {
+    TypeSpec spec;
+    spec.kind = TypeKind::Struct;
+    spec.structName = name;
+    return spec;
 }
 
 }  // namespace ascend

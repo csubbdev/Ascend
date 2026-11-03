@@ -12,6 +12,20 @@ namespace ascend {
 // With `quiet`, the program's output is discarded.
 int runProcess(const std::vector<std::string>& args, bool quiet = false);
 
+// What a program printed, and how it ended.
+struct CapturedOutput {
+    int code = -1;
+    std::string out;
+    std::string err;
+};
+
+// Runs a program (no shell) with `input` as its standard input, and captures
+// what it prints. Returns false if it couldn't be started.
+bool captureProcess(const std::vector<std::string>& args, const std::string& input, CapturedOutput& result);
+
+// The same for a command run by the system shell (sh, or cmd on Windows).
+bool captureShell(const std::string& command, const std::string& input, CapturedOutput& result);
+
 // Reads an environment variable ("" if it isn't set).
 std::string environmentVariable(const std::string& name);
 

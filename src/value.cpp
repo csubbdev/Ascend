@@ -5,6 +5,7 @@
 #include "utf8.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -68,14 +69,26 @@ void write(std::string& out, const Value& value, bool repr, std::vector<const vo
                 out += "{...}";
                 return;
             }
+            if (map->structType && activeValueHooks() != nullptr) {
+                std::string custom;  // a to_string() method
+                if (activeValueHooks()->customString(value, custom)) {
+                    out += custom;
+                    return;
+                }
+            }
             checkNesting(static_cast<int>(active.size()));
             active.push_back(map);
+            if (map->structInfo()) out += map->structInfo()->name;  // Point{x: 1, y: 2}
             out += '{';
             bool first = true;
             for (const auto& entry : map->entries) {
                 if (!first) out += ", ";
                 first = false;
-                write(out, entry.first, true, active);
+                if (map->structInfo() && entry.first.isString()) {
+                    out += entry.first.asString();
+                } else {
+                    write(out, entry.first, true, active);
+                }
                 out += ": ";
                 write(out, entry.second, true, active);
             }
@@ -88,6 +101,8 @@ void write(std::string& out, const Value& value, bool repr, std::vector<const vo
             std::string name = functionName(fn);
             if (fn.kind == Callable::Kind::Native) {
                 out += "<builtin " + name + ">";
+            } else if (fn.kind == Callable::Kind::Struct) {
+                out += "<struct " + name + ">";
             } else {
                 out += name.empty() ? "<func>" : "<func " + name + ">";
             }
@@ -128,7 +143,12 @@ bool equalAt(const Value& a, const Value& b, int depth) {
             checkNesting(depth);
             const MapObj& x = a.asMap();
             const MapObj& y = b.asMap();
+            bool custom = false;  // an operator== method
+            if (x.structType && activeValueHooks() != nullptr && activeValueHooks()->customEqual(a, b, custom)) {
+                return custom;
+            }
             if (x.size() != y.size()) return false;
+            if ((x.structInfo() ? x.structInfo()->name : "") != (y.structInfo() ? y.structInfo()->name : "")) return false;
             for (const auto& entry : x.entries) {
                 const Value* other = y.find(entry.first);
                 if (other == nullptr || !equalAt(entry.second, *other, depth + 1)) return false;
@@ -158,7 +178,13 @@ int compareAt(const Value& a, const Value& b, int depth) {
         }
         return x.size() < y.size() ? -1 : (x.size() > y.size() ? 1 : 0);
     }
-    throw RuntimeError(std::string("can't compare ") + a.typeName() + " with " + b.typeName());
+    int custom = 0;  // an operator< method
+    if (a.isMap() && a.asMap().structType && activeValueHooks() != nullptr &&
+        activeValueHooks()->customCompare(a, b, custom)) {
+        return custom;
+    }
+    throw RuntimeError("can't compare " + aTypeName(a) + " with " + aTypeName(b) +
+                       (a.isMap() && a.asMap().structType ? " (give the struct an operator< method to sort it)" : ""));
 }
 
 void appendEscaped(std::string& out, char c, char quote) {
@@ -373,6 +399,7 @@ bool MapObj::remove(const Value& key, Value* removed) {
 }
 
 void MapObj::forEachChild(const std::function<void(GcObject*)>& visit) const {
+    if (structType) visit(structType.get());
     for (const auto& entry : entries) {
         if (GcObject* child = entry.first.gcObject()) visit(child);
         if (GcObject* child = entry.second.gcObject()) visit(child);
@@ -382,10 +409,29 @@ void MapObj::forEachChild(const std::function<void(GcObject*)>& visit) const {
 void MapObj::clearReferences() {
     entries.clear();
     index_.clear();
+    structType.reset();
 }
 
 void FunctionObj::forEachChild(const std::function<void(GcObject*)>& visit) const {
     if (closure) visit(closure.get());
+}
+
+ValueHooks*& activeValueHooks() {
+    static thread_local ValueHooks* hooks = nullptr;
+    return hooks;
+}
+
+const Value* structMethod(const Value& value, const std::string& name) {
+    if (!value.isMap() || !value.asMap().structType) return nullptr;
+    return value.asMap().structType->method(name);
+}
+
+void StructType::forEachChild(const std::function<void(GcObject*)>& visit) const {
+    if (closure) visit(closure.get());
+    if (parent) visit(parent.get());
+    for (const auto& entry : methods) {
+        if (GcObject* child = entry.second.gcObject()) visit(child);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -394,16 +440,29 @@ void FunctionObj::forEachChild(const std::function<void(GcObject*)>& visit) cons
 std::string formatFloat(double value, bool singlePrecision) {
     if (std::isnan(value)) return "nan";
     if (std::isinf(value)) return value > 0 ? "inf" : "-inf";
-    // Use the shortest representation that reads back as the same number.
-    char buffer[32];
-    const int maxPrecision = singlePrecision ? 9 : 17;
-    for (int precision = 1; precision <= maxPrecision; ++precision) {
-        std::snprintf(buffer, sizeof buffer, "%.*g", precision, value);
+    // Use the fewest significant digits that read back as the same number.
+    char buffer[400];
+    const int maxDigits = singlePrecision ? 9 : 17;
+    int digits = 1;
+    for (; digits <= maxDigits; ++digits) {
+        std::snprintf(buffer, sizeof buffer, "%.*e", digits - 1, value);
         double parsed = std::strtod(buffer, nullptr);
         if ((singlePrecision ? roundToF32(parsed) : parsed) == value) break;
     }
-    std::string text = buffer;
-    if (text.find_first_of(".eE") == std::string::npos) text += ".0";  // keep floats looking like floats
+    if (digits > maxDigits) digits = maxDigits;
+    // Like Python: plain notation unless the exponent is very small or large
+    // (20.0, not 2e+01; 1e+16 and 1e-05 stay as they are).
+    const char* e = std::strchr(buffer, 'e');
+    int exponent = e != nullptr ? std::atoi(e + 1) : 0;
+    std::string text;
+    if (exponent >= -4 && exponent < 16) {
+        std::snprintf(buffer, sizeof buffer, "%.*f", std::max(0, digits - 1 - exponent), value);
+        text = buffer;
+    } else {
+        std::snprintf(buffer, sizeof buffer, "%.*g", digits, value);
+        text = buffer;
+    }
+    if (text.find_first_of(".eEn") == std::string::npos) text += ".0";  // keep floats looking like floats
     return text;
 }
 
@@ -425,9 +484,19 @@ std::string quoteChar(char32_t c) {
     return out;
 }
 
+std::string typeNameOf(const Value& value) {
+    if (value.isMap() && value.asMap().structInfo()) return value.asMap().structInfo()->name;
+    return value.typeName();
+}
+
 std::string aTypeName(const Value& value) {
-    std::string name = value.typeName();
+    std::string name = typeNameOf(value);
     if (value.isNull()) return "null";
+    if (value.isMap() && value.asMap().structInfo()) {
+        char first = static_cast<char>(std::tolower(static_cast<unsigned char>(name[0])));
+        bool vowel = first == 'a' || first == 'e' || first == 'i' || first == 'o' || first == 'u';
+        return (vowel ? "an " : "a ") + name;
+    }
     bool vowelSound = name[0] == 'a' || name[0] == 'e' || name[0] == 'i' || name[0] == 'o' ||
                       (name[0] == 'f' && name.size() > 1 && name[1] >= '0' && name[1] <= '9');  // "an f32"
     return (vowelSound ? "an " : "a ") + name;
@@ -435,6 +504,7 @@ std::string aTypeName(const Value& value) {
 
 std::string functionName(const Callable& callable) {
     if (callable.kind == Callable::Kind::Native) return static_cast<const NativeFunction&>(callable).name;
+    if (callable.kind == Callable::Kind::Struct) return static_cast<const StructType&>(callable).info->name;
     return static_cast<const FunctionObj&>(callable).name;
 }
 

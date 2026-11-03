@@ -303,7 +303,7 @@ TEST(interp_list_builtins) {
         " reduce(nums, func(a, b) { return a + b }), reduce([], func(a, b) { return a }, 0))",
         "[1, 4, 9, 16] [2, 4] 10 0\n");
     CHECK_ERROR("pop([])", "pop() from an empty list");
-    CHECK_ERROR("sort([1, \"a\"])", "can't compare string with int");
+    CHECK_ERROR("sort([1, \"a\"])", "can't compare a string with an int");
 }
 
 TEST(interp_maps) {

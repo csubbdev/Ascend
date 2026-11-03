@@ -7,8 +7,8 @@ apkg install testing
 ```
 
 ```
-t := import("testing")
-geometry := import("geometry")
+import testing as t
+import geometry
 
 t.test("area of a square", func() {
     t.equal(geometry.area(3, 3), 9)

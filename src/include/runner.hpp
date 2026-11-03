@@ -5,10 +5,11 @@
 
 #include <ostream>
 #include <string>
+#include <vector>
 
 namespace ascend {
 
-constexpr const char* kVersion = "0.4.0";
+constexpr const char* kVersion = "1.0.0";
 
 // Process exit codes (following the BSD sysexits convention).
 constexpr int kExitSyntaxError = 65;
@@ -40,6 +41,10 @@ RunResult runSource(Interpreter& interpreter, const std::string& source, const R
 // Prepares a file's text for running: drops a UTF-8 byte order mark and
 // turns a first line starting with #! into a comment.
 void prepareSource(std::string& text);
+
+// The "in f(), called from file:line:column" lines printed after an uncaught
+// runtime error.
+std::string formatTraceback(const std::vector<TraceFrame>& frames, const std::string& mainFile);
 
 }  // namespace ascend
 

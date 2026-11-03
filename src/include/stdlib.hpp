@@ -15,6 +15,9 @@ class Interpreter;
 // (PI, E, ...) in the interpreter's builtin scope.
 void registerStandardLibrary(Interpreter& interpreter);
 
+// The builtins in stdlib_extra.cpp: run(), HTTP, paths, CSV, base64, ...
+void registerExtraLibrary(Interpreter& interpreter);
+
 // The integers produced by range(start, stop, step).
 struct RangeSpec {
     int64_t start = 0;

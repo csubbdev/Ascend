@@ -22,6 +22,12 @@ struct CoerceFailure {
 // Lists, maps and functions are not converted. Returns false on failure.
 bool coerceToType(const Value& value, const TypeSpec& type, Value& out, CoerceFailure& failure);
 
+// Checks (and converts) a value being added to a list<T> or stored in a
+// map<K, V>. Throws RuntimeError if it doesn't fit; does nothing for
+// untyped lists and maps.
+Value checkListItem(const ListObj& list, Value value);
+void checkMapEntry(const MapObj& map, const Value& key, Value& value);
+
 // "a string", "300", "null", "'a'"... for error messages.
 std::string describeValue(const Value& value);
 

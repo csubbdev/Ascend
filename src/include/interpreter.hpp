@@ -32,6 +32,15 @@ struct ExitRequest {
     int code;
 };
 
+// One function call that an uncaught error passed through: the function, and
+// where it was called from (line 0: by a builtin; line -1: by the runtime).
+struct TraceFrame {
+    std::string function;  // e.g. "divide()" or "Vec.length()"
+    const SourceFile* source;
+    int line;
+    int column;
+};
+
 // A tree-walking interpreter for Ascend programs.
 class Interpreter {
 public:
@@ -46,17 +55,35 @@ public:
     void execute(std::unique_ptr<Program> program, std::unique_ptr<SourceFile> source = nullptr);
 
     // Calls an Ascend or builtin function. `line`/`column` locate errors.
-    Value call(const Value& callee, std::vector<Value> args, int line = 0, int column = 0);
+    // `named` holds arguments given by name: f(1, size: 2).
+    Value call(const Value& callee, std::vector<Value> args, int line = 0, int column = 0,
+               const std::vector<std::pair<std::string, Value>>* named = nullptr);
 
     // Runs another Ascend file (once) and returns its top-level names as a
     // map. Relative paths are relative to the file that is running.
     Value importModule(const std::string& path);
+
+    // The calls an uncaught error passed through, innermost first. Reset by
+    // each execute() and whenever an error is caught.
+    const std::vector<TraceFrame>& traceback() const { return trace_; }
+
+    // Calls the program's main() function, C style: with no arguments, with
+    // the list `args`, or with (count, args), depending on its parameters.
+    // Returns its result as an exit code (0 unless it returns an integer).
+    int runMain();
+
+    // Stores `value` in a map element, checking the field types of structs
+    // and refusing changes to enums.
+    void setElement(MapObj& map, const Value& key, Value value);
 
     // Operations shared with the standard library.
     Value binaryOp(TokenType op, const Value& left, const Value& right);
     Value indexGet(const Value& object, const Value& index);
     Value slice(const Value& object, const Value& start, const Value& end);
     bool contains(const Value& container, const Value& item);
+
+    // A struct's iter() result for loops (other values are returned as they are).
+    Value iterable(const Value& value);
 
     // Allocation of objects the cycle collector should know about.
     std::shared_ptr<Environment> newEnvironment(std::shared_ptr<Environment> parent);
@@ -87,6 +114,18 @@ public:
     size_t trackedObjectCount() const { return heap_.size(); }
 
 private:
+    // Calls struct methods for printing and comparing (see ValueHooks).
+    class Hooks final : public ValueHooks {
+    public:
+        explicit Hooks(Interpreter& interpreter) : interpreter_(interpreter) {}
+        bool customString(const Value& value, std::string& out) override;
+        bool customEqual(const Value& a, const Value& b, bool& out) override;
+        bool customCompare(const Value& a, const Value& b, int& out) override;
+
+    private:
+        Interpreter& interpreter_;
+    };
+
     enum class Flow { Normal, Break, Continue, Return };
     using EnvPtr = std::shared_ptr<Environment>;
     class FrameGuard;
@@ -100,7 +139,15 @@ private:
     Flow execDeclare(const DeclareStmt& stmt, const EnvPtr& env);
     Flow execAssign(const AssignStmt& stmt, const EnvPtr& env);
     Flow execFor(const ForStmt& stmt, const EnvPtr& env);
+    Flow execCFor(const CForStmt& stmt, const EnvPtr& env);
+    Flow execWhile(const WhileStmt& stmt, const EnvPtr& env);
+    Flow execSwitch(const SwitchStmt& stmt, const EnvPtr& env);
+    Flow execImport(const ImportStmt& stmt, const EnvPtr& env);
+    Flow execEnum(const EnumStmt& stmt, const EnvPtr& env);
+    Flow execMultiAssign(const MultiAssignStmt& stmt, const EnvPtr& env);
+    void assignTo(const Expr& target, Value value, const EnvPtr& env);
     Flow execTry(const TryStmt& stmt, const EnvPtr& env);
+    Flow execTryCatch(const TryStmt& stmt, const EnvPtr& env);
     Flow execMatch(const MatchStmt& stmt, const EnvPtr& env);
     Flow execReturn(const ReturnStmt& stmt, const EnvPtr& env);
     void hoistFunctions(const Block& block, const EnvPtr& env);
@@ -112,10 +159,20 @@ private:
     Value evalUnary(const UnaryExpr& expr, const EnvPtr& env);
     Value evalMember(const MemberExpr& expr, const EnvPtr& env);
     Value evalFString(const FStringExpr& expr, const EnvPtr& env);
+    Value evalIncDec(const IncDecExpr& expr, const EnvPtr& env);
+    Value evalComprehension(const ComprehensionExpr& expr, const EnvPtr& env);
+    Value evalRange(const RangeExpr& expr, const EnvPtr& env);
+    bool inRange(const Value& value, const RangeExpr& range, const EnvPtr& env);
+    bool matchesPattern(const Value& subject, const Expr& pattern, const EnvPtr& env);
+    Value makeStruct(const StructStmt& stmt, const EnvPtr& env);
+    Value constructStruct(const std::shared_ptr<StructType>& type, std::vector<Value> args, int line, int column,
+                          const std::vector<std::pair<std::string, Value>>* named = nullptr);
     Value makeFunction(const FunctionExpr& expr, const EnvPtr& env, const std::string& name);
     void indexSet(const Value& object, const Value& index, Value value);
 
-    Value zeroValue(const TypeSpec& type);
+    Value zeroValue(const TypeSpec& type, const EnvPtr& env);
+    void defineName(const EnvPtr& env, const std::string& name, Value value, const TypeSpec& type = TypeSpec(),
+                    bool constant = false);
     Value coerceVariable(const std::string& name, const TypeSpec& type, Value value);
     void noteErrorSite(int line, int column);
     void applyErrorSite(RuntimeError& error);
@@ -144,9 +201,13 @@ private:
     int errorColumn_ = 0;
     const SourceFile* errorSource_ = nullptr;
     bool replMode_ = false;
+    bool runningMain_ = false;
     int callDepth_ = 0;
     int maxCallDepth_;
     StackLimit stack_;
+    std::vector<TraceFrame> trace_;
+    Hooks hooks_{*this};
+    ValueHooks* previousHooks_ = nullptr;
 
     std::vector<std::weak_ptr<GcObject>> heap_;
     size_t nextCollection_;

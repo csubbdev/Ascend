@@ -47,6 +47,22 @@
           ]
         },
         {
+          "name": "string.quoted.triple.raw.ascend",
+          "begin": "\\br\"\"\"",
+          "end": "\"\"\""
+        },
+        {
+          "name": "string.quoted.triple.ascend",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [{ "include": "#escapes" }]
+        },
+        {
+          "name": "string.quoted.double.raw.ascend",
+          "begin": "\\br\"",
+          "end": "\""
+        },
+        {
           "name": "string.quoted.double.ascend",
           "begin": "\"",
           "end": "\"",
@@ -78,7 +94,7 @@
     },
     "typed-function-declaration": {
       "comment": "C-style function: the return type, then the name, e.g. i32 add(i32 a, i32 b)",
-      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|int|byte|f32|f64|float|bool|char|string|list|map|any|void)(\\?)?\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|int|byte|short|long|f32|f64|float|double|bool|char|string|list|map|any|void|auto)(\\?)?\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
       "captures": {
         "1": { "name": "storage.type.ascend" },
         "2": { "name": "storage.type.ascend" },
@@ -89,21 +105,38 @@
       "patterns": [
         {
           "name": "keyword.control.ascend",
-          "match": "\\b(if|else|while|for|in|break|continue|return|match|try|catch|throw)\\b"
+          "match": "\\b(if|else|while|for|in|break|continue|return|match|try|catch|finally|throw|switch|case|default|do)\\b"
+        },
+        { "name": "keyword.control.import.ascend", "match": "^\\s*(import|from)\\b(?!\\s*[(:=])" },
+        { "name": "keyword.control.import.ascend", "match": "\\b(as)\\b(?=\\s+[A-Za-z_])" },
+        {
+          "match": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.ascend" },
+            "2": { "name": "entity.name.type.ascend" }
+          }
         },
         { "name": "storage.type.function.ascend", "match": "\\bfunc\\b" },
         { "name": "storage.modifier.ascend", "match": "\\bconst\\b" },
+        {
+          "match": "\\b(operator)\\s*(\\+|-|\\*\\*|\\*|/|%|==|<|\\[\\])",
+          "captures": {
+            "1": { "name": "keyword.other.operator.ascend" },
+            "2": { "name": "entity.name.function.operator.ascend" }
+          }
+        },
         { "name": "keyword.operator.logical.ascend", "match": "\\b(and|or|not)\\b" }
       ]
     },
     "types": {
       "name": "storage.type.ascend",
-      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|int|byte|f32|f64|float|bool|char|string|list|map|any|void)\\b\\??"
+      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|int|byte|short|long|f32|f64|float|double|bool|char|string|list|map|any|void|auto)\\b\\??"
     },
     "constants": {
       "patterns": [
         { "name": "constant.language.ascend", "match": "\\b(true|false|null)\\b" },
-        { "name": "support.constant.ascend", "match": "\\b(PI|E|INF|NAN|args)\\b" }
+        { "name": "support.constant.ascend", "match": "\\b(PI|E|INF|NAN|args)\\b" },
+        { "name": "variable.language.this.ascend", "match": "\\b(this|super)\\b" }
       ]
     },
     "function-call": {
@@ -113,7 +146,10 @@
     "operators": {
       "patterns": [
         { "name": "keyword.operator.assignment.ascend", "match": ":=|<<=|>>=|[-+*/%&|^]=" },
+        { "name": "keyword.operator.increment.ascend", "match": "\\+\\+|--" },
         { "name": "keyword.operator.arrow.ascend", "match": "->|=>" },
+        { "name": "keyword.operator.null.ascend", "match": "\\?\\?|\\?\\." },
+        { "name": "keyword.operator.range.ascend", "match": "\\.\\.\\.|\\.\\.=?" },
         { "name": "keyword.operator.bitwise.ascend", "match": "<<|>>" },
         { "name": "keyword.operator.comparison.ascend", "match": "==|!=|<=|>=|<|>" },
         { "name": "keyword.operator.logical.ascend", "match": "&&|\\|\\||!" },

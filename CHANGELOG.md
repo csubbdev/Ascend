@@ -1,5 +1,113 @@
 # Changelog
 
+## 1.0.0
+
+### New
+
+- **Inheritance**: `struct Dog : Animal { ... }` gets Animal's fields and
+  methods; methods can be replaced and call the replaced version with
+  `super.name()`. A Dog can be used wherever an Animal is expected, and
+  `is_a(value, Animal)` checks it.
+- **Operator overloading** with methods named `operator+`, `operator-`,
+  `operator*`, `operator/`, `operator%`, `operator**`, `operator==`,
+  `operator<` (which also gives `>`, `<=`, `>=`, `sort`, `min` and `max`) and
+  `operator[]`.
+- **Special methods**: `to_string()` (used by `print`, `str`, f-strings and
+  string concatenation), `iter()` (for loops and comprehensions), `len()` and
+  `contains()` (`in`).
+- **Typed lists and maps**: `list<i32>`, `map<string, f64>`,
+  `list<list<string>>`. Elements are checked and converted, and the list or
+  map keeps checking what's added to it later.
+- **Tracebacks**: uncaught errors list the calls they passed through.
+- **Deep recursion**: programs run on a thread with a large stack, so
+  recursion can go 100,000 calls deep (it was about 2,000).
+- **`ascend test`** runs every `*_test.asc` / `test_*.asc` file and reports
+  which passed.
+- **Running programs**: `run(["git", "status"])` and `run("ls | wc -l")`
+  capture the output and exit code.
+- **HTTP**: `http_get`, `http_post` and `http_request` (using curl).
+- **Files and folders**: `walk_dir`, `remove_dir`, `copy_file`, `move_file`,
+  `file_size`, `path_join`, `basename`, `dirname`, `extension`, `abs_path`,
+  `cwd`, `chdir`, `temp_dir`.
+- **Data**: `csv_parse`, `csv_stringify`, `base64_encode`, `base64_decode`,
+  `sha256`, `uuid`.
+- **More builtins**: `now`, `format_time`, `set_env`, `platform`,
+  `capitalize`, `title`, `trim_start`, `trim_end`, `last_index_of`, `lcm`,
+  `factorial`, `trunc`, `degrees`, `radians`, `union`, `intersect`,
+  `difference`, `is_a`.
+
+### Changed
+
+- Comparing values that can't be compared says what they are: "can't compare
+  a string with an int".
+
+## 0.6.0
+
+### New
+
+- **Struct methods**: functions written inside a struct, called as
+  `value.method()`, get the value as `this`. An `init()` method runs whenever
+  a value is made.
+- **Lambdas**: `x => x * 2`, `(a, b) => a + b`, `(i32 n) => { ... }`.
+- **Comprehensions**: `[x * x for x in xs if x > 0]`, with several `for` and
+  `if` clauses, and map comprehensions `{k: v for k, v in m}`.
+- **Destructuring**: `a, b := 1, 2`, `a, b = b, a`, `low, high := minmax(xs)`
+  (with `return a, b`), and `x, y := point` for structs.
+- **Ranges**: `0..10` and `1..=10` (also for chars: `'a'..='z'`), usable in
+  `for` loops and `in` tests without building a list, and as `switch` cases
+  and `match` patterns: `case 90..=100:`.
+- **Null-safe operators**: `a ?? b` and `a?.b` / `a?.method()`.
+- **Named arguments**: `greet("Ada", mark: "?")`, `Box(height: 2)`.
+- **Variadic functions**: `i32 sum(i32 ...numbers)`, and `...list` to spread
+  a list into a call's arguments or another list, or a map into a map.
+- **`finally`** blocks, which run however a `try` ends; `try` can also be used
+  with only `finally`.
+- **Raw strings** `r"\d+"` and **multi-line strings** `"""..."""`.
+- New builtins: `group_by`, `count_by`, `chunk`, `flat_map`, `min_by`,
+  `max_by`, `mean`, `median`.
+
+## 0.5.0
+
+### New
+
+- **C-style syntax**:
+  - `for (init; condition; step)` loops, with several comma-separated
+    statements in the first and last parts (`for (i32 i = 0, j = n; i < j;
+    i++, j--)`), empty parts (`for (;;)`), and `for { }` to loop until
+    `break`. Closures created in the body see that iteration's variables.
+  - `++` and `--`, before or after a variable, element or field.
+  - `switch` / `case` / `default` with C's fall-through and `break`; a case
+    can list several values (`case 1, 2:`).
+  - `do { ... } while (condition)`.
+  - Bodies without braces for `if`, `else`, `while`, `for` and `do`:
+    `if (x < 0) x = -x`, on the same line or the next.
+  - Casts: `(f64) total / count`, `(i32) 3.9`, `(char) 65`.
+  - Several declarations in one statement: `i32 a = 1, b = 2`.
+  - `double`, `long` and `short` as names for `f64`, `i64` and `i16`.
+  - `auto x = value` fixes the variable's type to its first value's type.
+  - A top-level `main()` runs automatically after the rest of the program
+    (unless the program calls it), with `args` or `(argc, argv)` if it takes
+    them; an integer result is the exit code.
+  - `printf` and `sprintf` with C format strings.
+- Typed loop variables, and `:` instead of `in`: `for (string s : names)`.
+- **Import statements**: `import geometry`, `import lib.shapes as shapes`,
+  `import "path/file.asc" as name`, `from geometry import area, Point as P`
+  and `from geometry import *`. The `import(...)` function still works.
+- **Structs**: `struct Point { f64 x; f64 y = 0 }` declares a type with typed
+  fields and a constructor, `Point(1, 2)`. Struct names work as types in
+  declarations, parameters and return values; fields keep their types, and
+  unknown fields are errors. Struct values print as `Point{x: 1.0, y: 2.0}`.
+- **Enums**: `enum Color { Red, Green = 5, Blue }` makes a constant map of
+  names to ints.
+- Regular expressions: `regex_match`, `regex_search`, `regex_find_all`,
+  `regex_replace`, `regex_split`.
+- Folders: `is_dir`, `make_dir`, `list_dir`.
+
+### Fixed
+
+- Floats with few significant digits printed in exponent form: `20.0`
+  printed as `2e+01`.
+
 ## 0.4.0
 
 ### New

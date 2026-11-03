@@ -2,6 +2,7 @@
 #define ASCEND_TYPES_HPP
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace ascend {
@@ -24,21 +25,33 @@ uint64_t unsignedMax(NumKind kind);   // for unsigned integer kinds
 const char* numKindName(NumKind kind);
 std::string rangeText(NumKind kind);  // e.g. "0 to 255"
 
-enum class TypeKind : uint8_t { Any, Void, Bool, Number, Char, String, List, Map, Function };
+// Struct: a type declared with `struct Name { ... }`, named by structName.
+enum class TypeKind : uint8_t { Any, Void, Bool, Number, Char, String, List, Map, Function, Struct };
 
 // A type annotation, such as the `u8` in `u8 x = 1` or `string?` (nullable).
 struct TypeSpec {
     TypeKind kind = TypeKind::Any;
     NumKind num = NumKind::Int;  // used when kind == Number
     bool nullable = false;
+    std::string structName;      // used when kind == Struct
+    // list<T>: element is T.  map<K, V>: key is K and element is V. Null for
+    // plain `list` and `map`, which hold anything.
+    std::shared_ptr<const TypeSpec> element;
+    std::shared_ptr<const TypeSpec> key;
 
     bool isAny() const { return kind == TypeKind::Any; }
     std::string name() const;
 };
 
-// Looks up a type name such as "i32", "byte" or "string". Returns false for
-// names that aren't types.
+// Whether two types are the same, including their element types.
+bool sameType(const TypeSpec& a, const TypeSpec& b);
+
+// Looks up a builtin type name such as "i32", "byte" or "string". Returns
+// false for other names (which may be struct types).
 bool lookupType(const std::string& name, TypeSpec& out);
+
+// A struct type with the given name.
+TypeSpec structType(const std::string& name);
 
 }  // namespace ascend
 

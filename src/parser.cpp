@@ -28,7 +28,97 @@ bool isAssignmentOperator(TokenType type) {
 }
 
 bool isAssignable(const Expr& expr) {
-    return expr.kind == ExprKind::Variable || expr.kind == ExprKind::Index || expr.kind == ExprKind::Member;
+    if (expr.kind == ExprKind::Member) return !expr.as<MemberExpr>().optional;
+    return expr.kind == ExprKind::Variable || expr.kind == ExprKind::Index;
+}
+
+// Sets a flag for the rest of a scope, and restores it even when a syntax
+// error unwinds the parser.
+class FlagGuard {
+public:
+    FlagGuard(bool& flag, bool value) : flag_(flag), saved_(flag) { flag_ = value; }
+    ~FlagGuard() { flag_ = saved_; }
+    FlagGuard(const FlagGuard&) = delete;
+    FlagGuard& operator=(const FlagGuard&) = delete;
+
+private:
+    bool& flag_;
+    bool saved_;
+};
+
+// Gives a method its first parameter, the value it's called on.
+void addThisParameter(FunctionExpr& method) {
+    Param self;
+    self.name = "this";
+    method.params.insert(method.params.begin(), std::move(self));
+    ++method.requiredParams;
+}
+
+// Tokens that continue an expression after a closing parenthesis. Anything
+// else after `if (...)` starts the body: `if (x > 0) print(x)`.
+bool continuesExpression(TokenType type) {
+    switch (type) {
+        case TokenType::Plus:
+        case TokenType::Minus:
+        case TokenType::Star:
+        case TokenType::StarStar:
+        case TokenType::Slash:
+        case TokenType::Percent:
+        case TokenType::Ampersand:
+        case TokenType::Pipe:
+        case TokenType::Caret:
+        case TokenType::ShiftLeft:
+        case TokenType::ShiftRight:
+        case TokenType::EqualEqual:
+        case TokenType::NotEqual:
+        case TokenType::Less:
+        case TokenType::LessEqual:
+        case TokenType::Greater:
+        case TokenType::GreaterEqual:
+        case TokenType::In:
+        case TokenType::And:
+        case TokenType::Or:
+        case TokenType::Question:
+        case TokenType::Dot:
+        case TokenType::LeftBracket:
+        case TokenType::LeftParen:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Tokens that can start an operand, so `(i32) x` is a cast.
+bool startsOperand(TokenType type) {
+    switch (type) {
+        case TokenType::Identifier:
+        case TokenType::Int:
+        case TokenType::Float:
+        case TokenType::String:
+        case TokenType::Char:
+        case TokenType::FStringStart:
+        case TokenType::LeftParen:
+        case TokenType::LeftBracket:
+        case TokenType::True:
+        case TokenType::False:
+        case TokenType::Null:
+        case TokenType::Minus:
+        case TokenType::Not:
+        case TokenType::Tilde:
+        case TokenType::PlusPlus:
+        case TokenType::MinusMinus:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// A name that can be used as a variable: "geometry", not "my-lib" or "if".
+bool isIdentifierText(const std::string& text) {
+    Lexer lexer(text);
+    std::vector<Token> tokens = lexer.tokenize();
+    return lexer.errors().empty() && !tokens.empty() && tokens[0].type == TokenType::Identifier &&
+           tokens[0].lexeme == text;
 }
 
 template <typename T>
@@ -85,10 +175,22 @@ std::unique_ptr<Program> Parser::parseProgram() {
 
 // Records facts about a block's statements that the interpreter relies on.
 void Parser::noteStatement(Block& block, const Stmt& stmt) {
-    if (stmt.kind == StmtKind::Declare) block.declaresNames = true;
-    if (stmt.kind == StmtKind::Function) {
-        block.declaresNames = true;
-        block.hasFunctions = true;
+    switch (stmt.kind) {
+        case StmtKind::Declare:
+        case StmtKind::Import:
+        case StmtKind::Enum:
+            block.declaresNames = true;
+            break;
+        case StmtKind::Function:
+        case StmtKind::Struct:
+            block.declaresNames = true;
+            block.hasFunctions = true;
+            break;
+        case StmtKind::Group:
+            for (const auto& inner : stmt.as<GroupStmt>().statements) noteStatement(block, *inner);
+            break;
+        default:
+            break;
     }
 }
 
@@ -120,20 +222,50 @@ StmtPtr Parser::statement() {
         case TokenType::Const: advance(); return constDeclaration(token);
         case TokenType::Match: advance(); return matchStatement(token);
         case TokenType::Identifier: {
-            // C-style declarations: `u8 age = 30` and functions `i32 add(i32 a, i32 b) { }`.
-            size_t length = typeLength(0);
-            if (length > 0 && peek(length).type == TokenType::Identifier) {
+            // Words that only have a special meaning at the start of a statement,
+            // so they can still be used as names elsewhere.
+            TokenType next = peek(1).type;
+            if (isWord(0, "import") && (next == TokenType::Identifier || next == TokenType::String)) {
+                advance();
+                return importStatement(token);
+            }
+            if (isWord(0, "from") && looksLikeFromImport()) {
+                advance();
+                return fromImportStatement(token);
+            }
+            if ((isWord(0, "struct") || isWord(0, "enum")) && next == TokenType::Identifier &&
+                (peek(2).type == TokenType::LeftBrace || peek(2).type == TokenType::Newline ||
+                 (token.lexeme == "struct" && peek(2).type == TokenType::Colon))) {
+                advance();
+                return token.lexeme == "struct" ? structDeclaration(token) : enumDeclaration(token);
+            }
+            if (isWord(0, "switch") && looksLikeSwitch()) {
+                advance();
+                return switchStatement(token);
+            }
+            size_t afterDo = current_ + 1;
+            while (afterDo + 1 < tokens_.size() && tokens_[afterDo].type == TokenType::Newline) ++afterDo;
+            if (isWord(0, "do") && (tokens_[afterDo].type == TokenType::LeftBrace || next == TokenType::Identifier)) {
+                advance();
+                return doStatement(token);
+            }
+            if (isWord(0, "auto") && next == TokenType::Identifier) return typedDeclaration();
+            if ((isWord(0, "case") && next != TokenType::Declare && !isAssignmentOperator(next)) ||
+                (isWord(0, "default") && next == TokenType::Colon)) {
+                error(token, "'" + token.lexeme + "' can only be used inside a switch");
+            }
+
+            // C-style declarations: `u8 age = 30`, `Point p = Point(1, 2)` and
+            // functions `i32 add(i32 a, i32 b) { }`.
+            size_t length = typeLength(0, true);
+            if (length > 0 && peek(length).type == TokenType::Identifier && isDeclaration(length)) {
                 if (peek(length + 1).type == TokenType::LeftParen) return typedFunctionDeclaration();
                 return typedDeclaration();
             }
-            if (peek(1).type == TokenType::Colon) {
+            if (next == TokenType::Colon) {
                 // The other common style, `age: u8 = 30`: suggest the C-style form.
                 std::string type = typeLength(2) > 0 ? peek(2).lexeme : "i32";
                 error(token, "write the type before the name, like '" + type + " " + token.lexeme + " = ...'");
-            }
-            if (length == 0 && peek(1).type == TokenType::Identifier) {
-                TypeSpec unused;
-                if (!lookupType(token.lexeme, unused)) error(token, unknownTypeMessage(token.lexeme));
             }
             break;
         }
@@ -170,6 +302,9 @@ StmtPtr Parser::statement() {
             stmt->body = block("block");
             return stmt;
         }
+        case TokenType::PlusPlus:
+        case TokenType::MinusMinus:
+            break;  // ++x as a statement
         case TokenType::Else:
             error(token, "'else' without a matching 'if'");
         case TokenType::Catch:
@@ -181,8 +316,40 @@ StmtPtr Parser::statement() {
 }
 
 // Expression statements, declarations (x := 1) and assignments (x = 1, x += 1).
-StmtPtr Parser::simpleStatement() {
+StmtPtr Parser::simpleStatement(bool requireEnd, bool allowMulti) {
     ExprPtr expr = expression();
+
+    // a, b := pair      a, b = b, a
+    if (allowMulti && check(TokenType::Comma)) {
+        auto stmt = std::make_unique<MultiAssignStmt>(expr->line, expr->column);
+        stmt->targets.push_back(std::move(expr));
+        while (match(TokenType::Comma)) stmt->targets.push_back(expression());
+        if (match(TokenType::Declare)) {
+            stmt->declare = true;
+            for (const auto& target : stmt->targets) {
+                if (target->kind != ExprKind::Variable) {
+                    error(peek(), "':=' can only declare plain variable names (use '=' to change elements or fields)");
+                }
+            }
+        } else if (match(TokenType::Equal)) {
+            for (const auto& target : stmt->targets) {
+                if (!isAssignable(*target)) error(previous(), "can't assign to one of these expressions");
+            }
+        } else {
+            error(peek(), "expected '=' or ':=' after the variables, found " + describeToken(peek()));
+        }
+        const Token& start = peek();
+        skipNewlines();
+        do {
+            stmt->values.push_back(expression());
+        } while (match(TokenType::Comma));
+        if (stmt->values.size() != 1 && stmt->values.size() != stmt->targets.size()) {
+            error(start, "there are " + std::to_string(stmt->targets.size()) + " variables but " +
+                             std::to_string(stmt->values.size()) + " values");
+        }
+        if (requireEnd) expectStatementEnd();
+        return stmt;
+    }
 
     if (check(TokenType::Declare)) {
         const Token& op = advance();
@@ -193,7 +360,7 @@ StmtPtr Parser::simpleStatement() {
         stmt->name = expr->as<VariableExpr>().name;
         skipNewlines();
         stmt->value = expression();
-        expectStatementEnd();
+        if (requireEnd) expectStatementEnd();
         return stmt;
     }
 
@@ -205,20 +372,20 @@ StmtPtr Parser::simpleStatement() {
         stmt->target = std::move(expr);
         skipNewlines();
         stmt->value = expression();
-        expectStatementEnd();
+        if (requireEnd) expectStatementEnd();
         return stmt;
     }
 
     auto stmt = std::make_unique<ExpressionStmt>(expr->line, expr->column);
     stmt->expr = std::move(expr);
-    expectStatementEnd();
+    if (requireEnd) expectStatementEnd();
     return stmt;
 }
 
 StmtPtr Parser::ifStatement(const Token& keyword) {
     auto stmt = nodeAt<IfStmt>(keyword);
     stmt->condition = condition("if");
-    stmt->thenBody = block("'if' body");
+    stmt->thenBody = body("'if' body");
     if (peekPastNewlines().type == TokenType::Else) {
         skipNewlines();
         const Token& elseToken = advance();
@@ -227,7 +394,7 @@ StmtPtr Parser::ifStatement(const Token& keyword) {
             stmt->elseBranch = ifStatement(ifToken);
         } else {
             auto elseBlock = nodeAt<BlockStmt>(elseToken);
-            elseBlock->body = block("'else' body");
+            elseBlock->body = body("'else' body");
             stmt->elseBranch = std::move(elseBlock);
         }
     }
@@ -237,29 +404,392 @@ StmtPtr Parser::ifStatement(const Token& keyword) {
 StmtPtr Parser::whileStatement(const Token& keyword) {
     auto stmt = nodeAt<WhileStmt>(keyword);
     stmt->condition = condition("while");
-    stmt->body = block("'while' body");
+    stmt->body = body("'while' body");
     return stmt;
 }
 
+// do { ... } while (condition)
+StmtPtr Parser::doStatement(const Token& keyword) {
+    auto stmt = nodeAt<WhileStmt>(keyword);
+    stmt->doWhile = true;
+    stmt->body = body("'do' body");
+    skipNewlines();
+    consume(TokenType::While, "'while' and a condition after the 'do' body");
+    stmt->condition = condition("while");
+    expectStatementEnd();
+    return stmt;
+}
+
+// for x in items { }         for (x in items) { }       for (string s : names) { }
+// for (i32 i = 0; i < n; i++) { }                       for i := 0; i < n; i++ { }
+// for { }  (loops until `break`)
 StmtPtr Parser::forStatement(const Token& keyword) {
-    auto stmt = nodeAt<ForStmt>(keyword);
-    bool parenthesized = match(TokenType::LeftParen);  // allow for (x in xs) { ... }
-    stmt->first = consume(TokenType::Identifier, "a loop variable name after 'for'").lexeme;
-    if (match(TokenType::Comma)) {
-        stmt->second = consume(TokenType::Identifier, "a second loop variable name after ','").lexeme;
+    if (check(TokenType::LeftBrace)) {
+        auto stmt = nodeAt<CForStmt>(keyword);
+        stmt->body = block("'for' body");
+        return stmt;
     }
-    consume(TokenType::In, "'in' after the loop variable");
-    stmt->iterable = condition("in");
+    bool parenthesized = false;
+    if (check(TokenType::LeftParen)) {
+        size_t close = matchingParen(current_);
+        if (close != std::string::npos) {
+            if (hasTopLevelSemicolon(current_ + 1, close)) return cForStatement(keyword, true);
+            parenthesized = true;
+        }
+    } else {
+        // Without parentheses the header ends at the body's '{' or the end of the line.
+        size_t end = current_;
+        int depth = 0;
+        for (; end < tokens_.size(); ++end) {
+            TokenType type = tokens_[end].type;
+            if (type == TokenType::Eof || (depth == 0 && (type == TokenType::LeftBrace || type == TokenType::Newline))) {
+                break;
+            }
+            if (type == TokenType::LeftParen || type == TokenType::LeftBracket || type == TokenType::LeftBrace) ++depth;
+            if (type == TokenType::RightParen || type == TokenType::RightBracket || type == TokenType::RightBrace) --depth;
+        }
+        if (hasTopLevelSemicolon(current_, end)) return cForStatement(keyword, false);
+    }
+
+    auto stmt = nodeAt<ForStmt>(keyword);
+    if (parenthesized) advance();
+    loopVariable(stmt->first, stmt->firstType);
+    if (match(TokenType::Comma)) loopVariable(stmt->second, stmt->secondType);
+    if (!match(TokenType::In) && !match(TokenType::Colon)) {
+        error(peek(), "expected 'in' after the loop variable, found " + describeToken(peek()));
+    }
+    if (parenthesized) {
+        stmt->iterable = expression();
+        consume(TokenType::RightParen, "')' after the 'for' header");
+    } else {
+        stmt->iterable = condition("in");
+    }
+    stmt->body = body("'for' body");
+    return stmt;
+}
+
+// A loop variable, optionally with a type: `item`, `string name`, `auto x`.
+void Parser::loopVariable(std::string& name, TypeSpec& type) {
+    if (isWord(0, "auto") && peek(1).type == TokenType::Identifier) {
+        advance();
+    } else {
+        size_t length = typeLength(0, true);
+        if (length > 0 && peek(length).type == TokenType::Identifier) type = parseType(false);
+    }
+    name = consume(TokenType::Identifier, "a loop variable name after 'for'").lexeme;
+}
+
+StmtPtr Parser::cForStatement(const Token& keyword, bool parenthesized) {
+    auto stmt = nodeAt<CForStmt>(keyword);
+    if (parenthesized) advance();
+    if (!check(TokenType::Semicolon)) stmt->init = forClauses();
+    consume(TokenType::Semicolon, "';' after the first part of the 'for' header");
+    if (!check(TokenType::Semicolon)) stmt->condition = expression();
+    consume(TokenType::Semicolon, "';' after the loop condition");
+    TokenType end = parenthesized ? TokenType::RightParen : TokenType::LeftBrace;
+    if (!check(end)) stmt->step = forClauses();
     if (parenthesized) consume(TokenType::RightParen, "')' after the 'for' header");
-    stmt->body = block("'for' body");
+    int functionsBefore = functionCount_;
+    stmt->body = body("'for' body");
+    stmt->copyPerIteration = functionCount_ != functionsBefore;
+    return stmt;
+}
+
+// The statements in the first or last part of a C-style for header,
+// separated by commas: `i32 i = 0, j = n` or `i++, j--`.
+std::vector<StmtPtr> Parser::forClauses() {
+    std::vector<StmtPtr> clauses;
+    do {
+        size_t length = typeLength(0, true);
+        bool declaration = (isWord(0, "auto") && peek(1).type == TokenType::Identifier) ||
+                           (length > 0 && peek(length).type == TokenType::Identifier);
+        clauses.push_back(declaration ? typedDeclaration(false) : simpleStatement(false, false));
+    } while (match(TokenType::Comma));
+    return clauses;
+}
+
+// switch (value) { case 1: ... break  default: ... }
+StmtPtr Parser::switchStatement(const Token& keyword) {
+    auto stmt = nodeAt<SwitchStmt>(keyword);
+    stmt->subject = condition("switch");
+    skipNewlines();
+    const Token& open = consume(TokenType::LeftBrace, "'{' to start the switch cases");
+    NestingGuard guard(*this, open);
+    bool sawDefault = false;
+    while (true) {
+        skipSeparators();
+        if (check(TokenType::RightBrace) || isAtEnd()) break;
+        bool isCase = isWord(0, "case") && peek(1).type != TokenType::Declare && !isAssignmentOperator(peek(1).type);
+        bool isDefault = isWord(0, "default") && peek(1).type == TokenType::Colon;
+        if (!isCase && !isDefault) {
+            if (stmt->cases.empty()) {
+                errors_.push_back({peek().line, peek().column,
+                                   "expected 'case' or 'default' in the switch, found " + describeToken(peek())});
+                synchronize();
+                continue;
+            }
+            parseStatementInto(stmt->body);
+            continue;
+        }
+        size_t start = current_;
+        try {
+            const Token& label = advance();
+            SwitchCase entry;
+            entry.start = stmt->body.statements.size();
+            if (isDefault) {
+                if (sawDefault) error(label, "a switch can only have one 'default'");
+                sawDefault = true;
+            } else {
+                do {
+                    entry.values.push_back(expression());
+                } while (match(TokenType::Comma));
+            }
+            consume(TokenType::Colon, isDefault ? "':' after 'default'" : "':' after the case value");
+            stmt->cases.push_back(std::move(entry));
+        } catch (const ParseError&) {
+            synchronize();
+            if (current_ == start && !isAtEnd()) advance();
+        }
+    }
+    if (!check(TokenType::RightBrace)) {
+        error(peek(), "expected '}' to close the switch that starts on line " + std::to_string(open.line) +
+                          ", found " + describeToken(peek()));
+    }
+    advance();
+    return stmt;
+}
+
+// import geometry      import lib.shapes as shapes      import "../tools/x.asc" as x
+StmtPtr Parser::importStatement(const Token& keyword) {
+    auto stmt = nodeAt<ImportStmt>(keyword);
+    do {
+        const Token& start = peek();
+        ImportName item;
+        std::string lastPart;
+        item.name = modulePath(lastPart);
+        if (isWord(0, "as")) {
+            advance();
+            item.binding = consume(TokenType::Identifier, "a name after 'as'").lexeme;
+        } else if (isIdentifierText(lastPart)) {
+            item.binding = lastPart;
+        } else {
+            error(start, "can't use \"" + lastPart + "\" as a variable name; give the module a name with 'as', like: "
+                         "import " + start.lexeme + " as name");
+        }
+        stmt->names.push_back(std::move(item));
+    } while (match(TokenType::Comma));
+    expectStatementEnd();
+    return stmt;
+}
+
+// from geometry import area, Point as P      from "./helpers" import *
+StmtPtr Parser::fromImportStatement(const Token& keyword) {
+    auto stmt = nodeAt<ImportStmt>(keyword);
+    stmt->from = true;
+    std::string lastPart;
+    stmt->fromPath = modulePath(lastPart);
+    if (!isWord(0, "import")) error(peek(), "expected 'import' after the module name, found " + describeToken(peek()));
+    advance();
+    if (match(TokenType::Star)) {
+        stmt->all = true;
+    } else {
+        bool parenthesized = match(TokenType::LeftParen);
+        do {
+            if (parenthesized && check(TokenType::RightParen)) break;  // trailing comma
+            ImportName item;
+            item.name = consume(TokenType::Identifier, "a name to import").lexeme;
+            item.binding = item.name;
+            if (isWord(0, "as")) {
+                advance();
+                item.binding = consume(TokenType::Identifier, "a name after 'as'").lexeme;
+            }
+            stmt->names.push_back(std::move(item));
+        } while (match(TokenType::Comma));
+        if (parenthesized) consume(TokenType::RightParen, "')' after the imported names");
+    }
+    expectStatementEnd();
+    return stmt;
+}
+
+// A module: a dotted name (lib.shapes means the file lib/shapes.asc, or the
+// package lib's file shapes.asc) or a path in a string. `lastPart` is set to
+// the name the module is stored under by default.
+std::string Parser::modulePath(std::string& lastPart) {
+    if (check(TokenType::String)) {
+        const Token& token = advance();
+        std::string path = token.text;
+        if (path.empty()) error(token, "the module path is empty");
+        size_t slash = path.find_last_of("/\\");
+        lastPart = slash == std::string::npos ? path : path.substr(slash + 1);
+        size_t dot = lastPart.rfind('.');
+        if (dot != std::string::npos && dot > 0) lastPart = lastPart.substr(0, dot);  // "shapes.asc"
+        return path;
+    }
+    std::string path = consume(TokenType::Identifier, "a module name").lexeme;
+    lastPart = path;
+    while (check(TokenType::Dot) && peek(1).type == TokenType::Identifier) {
+        advance();
+        lastPart = advance().lexeme;
+        path += "/" + lastPart;
+    }
+    return path;
+}
+
+// struct Point {
+//     f64 x
+//     f64 y = 0
+// }
+StmtPtr Parser::structDeclaration(const Token& keyword) {
+    auto stmt = nodeAt<StructStmt>(keyword);
+    stmt->name = consume(TokenType::Identifier, "a name after 'struct'").lexeme;
+    if (match(TokenType::Colon)) {  // struct Dog : Animal
+        stmt->parent = consume(TokenType::Identifier, "the name of the struct to extend after ':'").lexeme;
+    }
+    skipNewlines();
+    const Token& open = consume(TokenType::LeftBrace, "'{' to start the struct's fields");
+    NestingGuard guard(*this, open);
+    while (true) {
+        skipSeparators();
+        if (check(TokenType::RightBrace) || isAtEnd()) break;
+        size_t start = current_;
+        try {
+            // Methods: `f64 area() { ... }`, `func describe() { ... }`, `reset() { ... }`,
+            // and operators: `Vec operator+(Vec other) { ... }`.
+            std::string opName;
+            size_t length = typeLength(0, true);
+            bool typedMethod = !check(TokenType::Func) && !isWord(0, "operator") && length > 0 &&
+                               ((peek(length).type == TokenType::Identifier && peek(length + 1).type == TokenType::LeftParen) ||
+                                operatorName(length, opName) > 0);
+            size_t afterFunc = check(TokenType::Func) ? 1 : 0;
+            bool untypedMethod = !typedMethod && ((peek(afterFunc).type == TokenType::Identifier &&
+                                                   peek(afterFunc + 1).type == TokenType::LeftParen) ||
+                                                  operatorName(afterFunc, opName) > 0);
+            if (typedMethod || untypedMethod) {
+                TypeSpec returnType;
+                if (typedMethod) {
+                    returnType = parseType(true);
+                } else {
+                    match(TokenType::Func);
+                }
+                const Token& nameToken = peek();
+                std::string name;
+                size_t count = operatorName(0, name);
+                if (count > 0) {
+                    for (size_t i = 0; i < count; ++i) advance();
+                } else {
+                    name = advance().lexeme;
+                }
+                auto method = functionRest(nameToken, stmt->name + "." + name, typedMethod ? &returnType : nullptr);
+                addThisParameter(*method);
+                stmt->methods.emplace_back(name, std::move(method));
+                continue;
+            }
+
+            TypeSpec type;
+            if (length > 0 && peek(length).type == TokenType::Identifier) type = parseType(false);
+            do {
+                const Token& name = consume(TokenType::Identifier, "a field name");
+                if (check(TokenType::LeftParen)) {
+                    error(peek(), "a method needs its own line: '" + type.name() + " " + name.lexeme + "() { ... }'");
+                }
+                if (check(TokenType::Colon)) {
+                    error(peek(), "write the field's type before its name, like 'f64 " + name.lexeme + "'");
+                }
+                StructField field;
+                field.name = name.lexeme;
+                field.type = type;
+                field.line = name.line;
+                field.column = name.column;
+                if (match(TokenType::Equal)) {
+                    skipNewlines();
+                    field.defaultValue = expression();
+                }
+                stmt->fields.push_back(std::move(field));
+            } while (match(TokenType::Comma));
+            expectStatementEnd();
+        } catch (const ParseError&) {
+            synchronize();
+            if (current_ == start && !isAtEnd()) advance();
+        }
+    }
+    if (!check(TokenType::RightBrace)) {
+        error(peek(), "expected '}' to close the struct that starts on line " + std::to_string(open.line) +
+                          ", found " + describeToken(peek()));
+    }
+    advance();
+    return stmt;
+}
+
+// `operator+`, `operator==`, `operator[]`... starting `offset` tokens ahead and
+// followed by '('. Returns how many tokens the name takes (0 if it isn't one).
+size_t Parser::operatorName(size_t offset, std::string& name) const {
+    if (!isWord(offset, "operator")) return 0;
+    const Token& symbol = peek(offset + 1);
+    switch (symbol.type) {
+        case TokenType::Plus:
+        case TokenType::Minus:
+        case TokenType::Star:
+        case TokenType::Slash:
+        case TokenType::Percent:
+        case TokenType::StarStar:
+        case TokenType::EqualEqual:
+        case TokenType::Less:
+            if (peek(offset + 2).type != TokenType::LeftParen) return 0;
+            name = "operator" + symbol.lexeme;
+            return 2;
+        case TokenType::LeftBracket:
+            if (peek(offset + 2).type != TokenType::RightBracket || peek(offset + 3).type != TokenType::LeftParen) return 0;
+            name = "operator[]";
+            return 3;
+        default:
+            return 0;
+    }
+}
+
+// enum Color { Red, Green = 5, Blue }
+StmtPtr Parser::enumDeclaration(const Token& keyword) {
+    auto stmt = nodeAt<EnumStmt>(keyword);
+    stmt->name = consume(TokenType::Identifier, "a name after 'enum'").lexeme;
+    skipNewlines();
+    const Token& open = consume(TokenType::LeftBrace, "'{' to start the enum's members");
+    NestingGuard guard(*this, open);
+    while (true) {
+        skipSeparators();
+        if (check(TokenType::RightBrace) || isAtEnd()) break;
+        const Token& name = consume(TokenType::Identifier, "an enum member name");
+        EnumMember member;
+        member.name = name.lexeme;
+        member.line = name.line;
+        member.column = name.column;
+        if (match(TokenType::Equal)) {
+            skipNewlines();
+            member.value = expression();
+        }
+        stmt->members.push_back(std::move(member));
+        if (!match(TokenType::Comma) && !check(TokenType::Newline) && !check(TokenType::Semicolon) &&
+            !check(TokenType::RightBrace)) {
+            error(peek(), "expected ',' or '}' after the enum member, found " + describeToken(peek()));
+        }
+    }
+    if (!check(TokenType::RightBrace)) {
+        error(peek(), "expected '}' to close the enum that starts on line " + std::to_string(open.line) +
+                          ", found " + describeToken(peek()));
+    }
+    advance();
     return stmt;
 }
 
 StmtPtr Parser::returnStatement(const Token& keyword) {
     auto stmt = nodeAt<ReturnStmt>(keyword);
     if (!check(TokenType::Newline) && !check(TokenType::Semicolon) && !check(TokenType::RightBrace) &&
-        !isAtEnd()) {
+        !check(TokenType::Else) && !isAtEnd()) {
         stmt->value = expression();
+        if (check(TokenType::Comma)) {  // return a, b  returns the list [a, b]
+            auto list = std::make_unique<ListExpr>(stmt->value->line, stmt->value->column);
+            list->elements.push_back(std::move(stmt->value));
+            while (match(TokenType::Comma)) list->elements.push_back(expression());
+            stmt->value = std::move(list);
+        }
     }
     expectStatementEnd();
     return stmt;
@@ -268,18 +798,28 @@ StmtPtr Parser::returnStatement(const Token& keyword) {
 StmtPtr Parser::tryStatement(const Token& keyword) {
     auto stmt = nodeAt<TryStmt>(keyword);
     stmt->body = block("'try' body");
-    if (peekPastNewlines().type != TokenType::Catch) {
-        error(peekPastNewlines(), "expected 'catch' after the 'try' block, found " + describeToken(peekPastNewlines()));
+    if (peekPastNewlines().type == TokenType::Catch) {
+        skipNewlines();
+        advance();  // catch
+        stmt->hasCatch = true;
+        if (match(TokenType::LeftParen)) {
+            stmt->errorName = consume(TokenType::Identifier, "an error variable name").lexeme;
+            consume(TokenType::RightParen, "')' after the error variable name");
+        } else if (check(TokenType::Identifier)) {
+            stmt->errorName = advance().lexeme;
+        }
+        stmt->handler = block("'catch' body");
     }
-    skipNewlines();
-    advance();  // catch
-    if (match(TokenType::LeftParen)) {
-        stmt->errorName = consume(TokenType::Identifier, "an error variable name").lexeme;
-        consume(TokenType::RightParen, "')' after the error variable name");
-    } else if (check(TokenType::Identifier)) {
-        stmt->errorName = advance().lexeme;
+    const Token& after = peekPastNewlines();
+    if (after.type == TokenType::Identifier && after.lexeme == "finally") {
+        skipNewlines();
+        advance();
+        stmt->hasFinally = true;
+        stmt->finallyBody = block("'finally' body");
     }
-    stmt->handler = block("'catch' body");
+    if (!stmt->hasCatch && !stmt->hasFinally) {
+        error(after, "expected 'catch' or 'finally' after the 'try' block, found " + describeToken(after));
+    }
     return stmt;
 }
 
@@ -294,38 +834,101 @@ StmtPtr Parser::throwStatement(const Token& keyword) {
 }
 
 // How many tokens the type name starting `offset` tokens ahead takes up
-// (1 for `u8`, 2 for `string?`), or 0 if there is no type name there.
-size_t Parser::typeLength(size_t offset) const {
+// (1 for `u8`, 2 for `string?`), or 0 if there is no type name there. With
+// `allowStruct`, any other name counts as a (struct) type name too; callers
+// check that a variable name follows.
+size_t Parser::typeLength(size_t offset, bool allowStruct) const {
     const Token& token = peek(offset);
     TypeSpec type;
-    bool isType = token.type == TokenType::Func || (token.type == TokenType::Identifier && lookupType(token.lexeme, type));
+    bool isType = token.type == TokenType::Func ||
+                  (token.type == TokenType::Identifier && (allowStruct || lookupType(token.lexeme, type)));
     if (!isType) return 0;
-    return peek(offset + 1).type == TokenType::Question ? 2 : 1;
+    size_t length = 1;
+    // list<i32>, map<string, list<f64>>
+    if ((token.lexeme == "list" || token.lexeme == "map") && peek(offset + 1).type == TokenType::Less) {
+        int depth = 0;
+        size_t i = offset + 1;
+        for (;; ++i) {
+            TokenType kind = peek(i).type;
+            if (kind == TokenType::Less) {
+                ++depth;
+            } else if (kind == TokenType::Greater) {
+                --depth;
+            } else if (kind == TokenType::ShiftRight) {
+                depth -= 2;
+            } else if (kind != TokenType::Identifier && kind != TokenType::Comma && kind != TokenType::Question &&
+                       kind != TokenType::Func) {
+                return 0;
+            }
+            if (depth <= 0) break;
+        }
+        if (depth < 0) return 0;
+        length = i - offset + 1;
+    }
+    return peek(offset + length).type == TokenType::Question ? length + 1 : length;
+}
+
+// After `Name name` or `Name? name` at the start of a statement: is it a
+// declaration? `Point p` always is, but `ready ? go() : wait()` isn't.
+bool Parser::isDeclaration(size_t typeTokens) const {
+    TypeSpec builtin;
+    if (typeTokens == 1 || peek().type == TokenType::Func || lookupType(peek().lexeme, builtin)) return true;
+    TokenType after = peek(typeTokens + 1).type;
+    if (after == TokenType::Equal || after == TokenType::Newline || after == TokenType::Semicolon ||
+        after == TokenType::Eof || after == TokenType::RightBrace) {
+        return true;
+    }
+    if (after != TokenType::LeftParen) return false;
+    size_t close = matchingParen(current_ + typeTokens + 1);
+    if (close == std::string::npos) return false;
+    TokenType next = tokens_[close + 1].type;
+    return next == TokenType::LeftBrace || next == TokenType::Newline;
 }
 
 std::string Parser::unknownTypeMessage(const std::string& name) {
     return "unknown type '" + name +
-           "' (the types are: i8 i16 i32 i64 u8 u16 u32 u64 int byte f32 f64 float bool char string list map "
-           "func any)";
+           "' (the types are: i8 i16 i32 i64 u8 u16 u32 u64 int byte short long f32 f64 float double bool char string "
+           "list map func any, and the structs you declare)";
 }
 
 // type name = value   or   type name   (which starts at the type's zero value)
-StmtPtr Parser::typedDeclaration() {
+// Several at once, C style: i32 a = 1, b = 2.   auto name = value takes the
+// value's type.
+StmtPtr Parser::typedDeclaration(bool requireEnd) {
     const Token& start = peek();
-    auto stmt = nodeAt<DeclareStmt>(start);
-    stmt->type = parseType(false);
-    stmt->hasType = true;
-    const Token& name = consume(TokenType::Identifier, "a variable name after the type");
-    stmt->name = name.lexeme;
-    if (check(TokenType::Declare)) {
-        error(peek(), "use '=' in a typed declaration, like '" + stmt->type.name() + " " + name.lexeme + " = ...'");
+    bool inferType = isWord(0, "auto");
+    TypeSpec type;
+    if (inferType) {
+        advance();
+    } else {
+        type = parseType(false);
     }
-    if (match(TokenType::Equal)) {
-        skipNewlines();
-        stmt->value = expression();
-    }
-    expectStatementEnd();
-    return stmt;
+    std::vector<StmtPtr> declarations;
+    do {
+        const Token& name = consume(TokenType::Identifier, "a variable name after the type");
+        auto stmt = nodeAt<DeclareStmt>(declarations.empty() ? start : name);
+        stmt->type = type;
+        stmt->hasType = !inferType;
+        stmt->inferType = inferType;
+        stmt->name = name.lexeme;
+        if (check(TokenType::Declare)) {
+            error(peek(), "use '=' in a typed declaration, like '" + (inferType ? "auto" : type.name()) + " " +
+                              name.lexeme + " = ...'");
+        }
+        if (match(TokenType::Equal)) {
+            skipNewlines();
+            stmt->value = expression();
+        } else if (inferType) {
+            error(peek(), "'auto " + name.lexeme + "' needs a value to take its type from, like 'auto " + name.lexeme +
+                              " = 0'");
+        }
+        declarations.push_back(std::move(stmt));
+    } while (match(TokenType::Comma));
+    if (requireEnd) expectStatementEnd();
+    if (declarations.size() == 1) return std::move(declarations[0]);
+    auto group = nodeAt<GroupStmt>(start);
+    group->statements = std::move(declarations);
+    return group;
 }
 
 // A function with its return type in front, C style: `i32 add(i32 a, i32 b) { ... }`
@@ -342,8 +945,11 @@ StmtPtr Parser::typedFunctionDeclaration() {
 StmtPtr Parser::constDeclaration(const Token& keyword) {
     auto stmt = nodeAt<DeclareStmt>(keyword);
     stmt->constant = true;
-    size_t length = typeLength(0);
-    if (length > 0 && peek(length).type == TokenType::Identifier) {
+    size_t length = typeLength(0, true);
+    if (isWord(0, "auto") && peek(1).type == TokenType::Identifier) {
+        advance();
+        stmt->inferType = true;
+    } else if (length > 0 && peek(length).type == TokenType::Identifier) {
         stmt->type = parseType(false);
         stmt->hasType = true;
     }
@@ -386,6 +992,8 @@ StmtPtr Parser::matchStatement(const Token& keyword) {
                 if (sawDefault) error(defaultToken, "a match can only have one default ('else') arm");
                 sawDefault = true;
             } else {
+                // `x => ...` here is a pattern and its arm, not a lambda.
+                FlagGuard patterns(noLambda_, true);
                 do {
                     arm.patterns.push_back(expression());
                 } while (match(TokenType::Comma));
@@ -413,8 +1021,9 @@ StmtPtr Parser::matchStatement(const Token& keyword) {
     return stmt;
 }
 
-// A type name like `i32`, `string` or `u8?` (the ? allows null).
-TypeSpec Parser::parseType(bool allowVoid) {
+// A type name like `i32`, `string`, `u8?` (the ? allows null) or the name of
+// a struct.
+TypeSpec Parser::parseType(bool allowVoid, bool allowStruct) {
     const Token& token = peek();
     std::string name;
     if (token.type == TokenType::Identifier) {
@@ -425,9 +1034,32 @@ TypeSpec Parser::parseType(bool allowVoid) {
         error(token, "expected a type name (like i32, f64, string or bool), found " + describeToken(token));
     }
     TypeSpec type;
-    if (!lookupType(name, type)) error(token, unknownTypeMessage(name));
+    if (name == "auto") error(token, "'auto' can only be used to declare a variable with a value");
+    if (!lookupType(name, type)) {
+        if (!allowStruct) error(token, unknownTypeMessage(name));
+        type = structType(name);  // checked once the whole program is parsed
+    }
     if (type.kind == TypeKind::Void && !allowVoid) error(token, "'void' can only be used as a return type");
     advance();
+    // list<i32> and map<string, f64>: the types of the elements.
+    if ((type.kind == TypeKind::List || type.kind == TypeKind::Map) && match(TokenType::Less)) {
+        if (type.kind == TypeKind::Map) {
+            type.key = std::make_shared<TypeSpec>(parseType(false, true));
+            consume(TokenType::Comma, "',' between the key and value types, like map<string, i32>");
+        }
+        type.element = std::make_shared<TypeSpec>(parseType(false, true));
+        if (check(TokenType::ShiftRight)) {
+            // The '>>' in list<list<i32>> closes two lists: use one '>' here, leave one.
+            Token& shift = tokens_[current_];
+            shift.type = TokenType::Greater;
+            shift.lexeme = ">";
+            ++shift.column;
+        } else {
+            consume(TokenType::Greater, type.kind == TypeKind::Map ? "'>' after the value type" : "'>' after the element type");
+        }
+    } else if (type.kind == TypeKind::Map && check(TokenType::Less)) {
+        error(peek(), "write map types like map<string, i32>");
+    }
     if (match(TokenType::Question)) {
         if (type.kind == TypeKind::Any || type.kind == TypeKind::Void) {
             error(previous(), "'" + name + "' can't be made nullable with '?'");
@@ -449,19 +1081,46 @@ StmtPtr Parser::functionDeclaration(const Token& keyword) {
 std::unique_ptr<FunctionExpr> Parser::functionRest(const Token& keyword, const std::string& name,
                                                    const TypeSpec* returnType) {
     auto function = nodeAt<FunctionExpr>(keyword);
+    ++functionCount_;
     function->name = name;
     if (returnType != nullptr) function->returnType = *returnType;
     consume(TokenType::LeftParen, name.empty() ? "'(' after 'func'" : "'(' after the function name");
+    parameters(*function);
+    if (check(TokenType::Arrow)) {
+        if (returnType != nullptr) error(peek(), "the return type is already written before the function name");
+        advance();
+        function->returnType = parseType(true);
+    }
+    function->body = block("function body");
+    return function;
+}
+
+// The parameters after '(' up to and including ')'. A typed parameter is
+// written C style, `i32 count`; `...rest` collects any further arguments.
+void Parser::parameters(FunctionExpr& function) {
     bool sawDefault = false;
     while (!check(TokenType::RightParen)) {
         Param parameter;
-        size_t length = typeLength(0);
-        if (length > 0 && peek(length).type == TokenType::Identifier) parameter.type = parseType(false);
+        size_t length = typeLength(0, true);
+        if (length > 0 && (peek(length).type == TokenType::Identifier || peek(length).type == TokenType::Ellipsis)) {
+            parameter.type = parseType(false);
+        }
+        bool rest = match(TokenType::Ellipsis);
         const Token& param = consume(TokenType::Identifier, "a parameter name");
         parameter.name = param.lexeme;
         if (check(TokenType::Colon)) {
             std::string type = typeLength(1) > 0 ? peek(1).lexeme : "i32";
             error(peek(), "write the parameter's type before its name, like '" + type + " " + param.lexeme + "'");
+        }
+        if (rest) {
+            if (check(TokenType::Equal)) error(peek(), "'..." + param.lexeme + "' can't have a default value");
+            function.variadic = true;
+            function.params.push_back(std::move(parameter));
+            match(TokenType::Comma);
+            if (!check(TokenType::RightParen)) {
+                error(peek(), "'..." + param.lexeme + "' collects the remaining arguments, so it must be the last parameter");
+            }
+            break;
         }
         if (match(TokenType::Equal)) {
             parameter.defaultValue = expression();
@@ -469,18 +1128,38 @@ std::unique_ptr<FunctionExpr> Parser::functionRest(const Token& keyword, const s
         } else if (sawDefault) {
             error(param, "parameter '" + param.lexeme + "' needs a default value because an earlier parameter has one");
         } else {
-            ++function->requiredParams;
+            ++function.requiredParams;
         }
-        function->params.push_back(std::move(parameter));
+        function.params.push_back(std::move(parameter));
         if (!match(TokenType::Comma)) break;
     }
     consume(TokenType::RightParen, "')' after the parameters");
-    if (check(TokenType::Arrow)) {
-        if (returnType != nullptr) error(peek(), "the return type is already written before the function name");
-        advance();
-        function->returnType = parseType(true);
+}
+
+// x => x * 2      (a, b) => a + b      (i32 n) => { return n * n }
+ExprPtr Parser::lambda(const Token& start, bool parenthesized) {
+    auto function = nodeAt<FunctionExpr>(start);
+    ++functionCount_;
+    NestingGuard guard(*this, start);
+    if (parenthesized) {
+        advance();  // (
+        parameters(*function);
+    } else {
+        Param parameter;
+        parameter.name = advance().lexeme;
+        function->params.push_back(std::move(parameter));
+        function->requiredParams = 1;
     }
-    function->body = block("function body");
+    consume(TokenType::FatArrow, "'=>' after the lambda's parameters");
+    FlagGuard lambdas(noLambda_, false);
+    if (check(TokenType::LeftBrace)) {
+        function->body = block("lambda body");
+    } else {
+        skipNewlines();
+        auto result = std::make_unique<ReturnStmt>(peek().line, peek().column);
+        result->value = expression();
+        function->body.statements.push_back(std::move(result));
+    }
     return function;
 }
 
@@ -502,16 +1181,103 @@ Block Parser::block(const std::string& what) {
     return result;
 }
 
+// The body of an if, else, while, for or do: a { block }, or C style a single
+// statement (on the same line or the next), or `;` for nothing.
+Block Parser::body(const std::string& what) {
+    if (match(TokenType::Semicolon)) return Block();  // while (busy());
+    skipNewlines();
+    if (check(TokenType::LeftBrace)) return block(what);
+    if (isAtEnd() || check(TokenType::RightBrace) || check(TokenType::Else)) {
+        error(peek(), "expected '{' to start the " + what + ", found " + describeToken(peek()));
+    }
+    NestingGuard guard(*this, peek());
+    Block result;
+    StmtPtr stmt = statement();
+    noteStatement(result, *stmt);
+    result.statements.push_back(std::move(stmt));
+    return result;
+}
+
+// The condition of an if, while, switch or match. When it's in parentheses,
+// the closing ')' ends it, so the body can follow on the same line without
+// braces: `if (x > 0) print(x)`.
 ExprPtr Parser::condition(const std::string& keyword) {
     if (check(TokenType::LeftBrace) || check(TokenType::Newline) || isAtEnd()) {
         error(peek(), "expected an expression after '" + keyword + "', found " + describeToken(peek()));
     }
+    if (check(TokenType::LeftParen)) {
+        size_t close = matchingParen(current_);
+        if (close != std::string::npos && !continuesExpression(tokens_[close + 1].type)) {
+            const Token& open = advance();
+            if (check(TokenType::RightParen)) error(peek(), "expected a condition between '(' and ')'");
+            ExprPtr inner = expression();
+            consume(TokenType::RightParen, "')' to close the '(' on line " + std::to_string(open.line));
+            return inner;
+        }
+    }
     return expression();
+}
+
+// The index of the ')' matching the '(' at `open`, or npos.
+size_t Parser::matchingParen(size_t open) const {
+    int depth = 0;
+    for (size_t i = open; i < tokens_.size(); ++i) {
+        TokenType type = tokens_[i].type;
+        if (type == TokenType::LeftParen) ++depth;
+        if (type == TokenType::RightParen && --depth == 0) return i;
+        if (type == TokenType::Eof) break;
+    }
+    return std::string::npos;
+}
+
+bool Parser::hasTopLevelSemicolon(size_t from, size_t to) const {
+    int depth = 0;
+    for (size_t i = from; i < to && i < tokens_.size(); ++i) {
+        TokenType type = tokens_[i].type;
+        if (type == TokenType::LeftParen || type == TokenType::LeftBracket || type == TokenType::LeftBrace) ++depth;
+        if (type == TokenType::RightParen || type == TokenType::RightBracket || type == TokenType::RightBrace) --depth;
+        if (type == TokenType::Semicolon && depth == 0) return true;
+    }
+    return false;
+}
+
+bool Parser::isWord(size_t ahead, const char* word) const {
+    const Token& token = peek(ahead);
+    return token.type == TokenType::Identifier && token.lexeme == word;
+}
+
+// from <module> import ...
+bool Parser::looksLikeFromImport() const {
+    size_t i = 1;
+    if (peek(i).type == TokenType::String) {
+        ++i;
+    } else if (peek(i).type == TokenType::Identifier) {
+        ++i;
+        while (peek(i).type == TokenType::Dot && peek(i + 1).type == TokenType::Identifier) i += 2;
+    } else {
+        return false;
+    }
+    return isWord(i, "import");
+}
+
+// switch (x) {   or   switch x {   (and not a call to a function named switch)
+bool Parser::looksLikeSwitch() const {
+    TokenType next = peek(1).type;
+    if (next == TokenType::LeftParen) {
+        size_t close = matchingParen(current_ + 1);
+        if (close == std::string::npos) return false;
+        size_t i = close + 1;
+        while (i + 1 < tokens_.size() && tokens_[i].type == TokenType::Newline) ++i;
+        return tokens_[i].type == TokenType::LeftBrace;
+    }
+    return startsOperand(next) && next != TokenType::Minus && next != TokenType::PlusPlus &&
+           next != TokenType::MinusMinus && next != TokenType::LeftBracket;
 }
 
 void Parser::expectStatementEnd() {
     if (match(TokenType::Newline) || match(TokenType::Semicolon)) return;
     if (check(TokenType::RightBrace) || isAtEnd()) return;
+    if (check(TokenType::Else)) return;  // if (x) a() else b()
     error(peek(), "expected a newline or ';' after the statement, found " + describeToken(peek()));
 }
 
@@ -567,7 +1333,7 @@ ExprPtr Parser::expression() {
 }
 
 ExprPtr Parser::ternary() {
-    ExprPtr condition = logicOr();
+    ExprPtr condition = nullish();
     if (!check(TokenType::Question)) return condition;
     const Token& question = advance();
     auto expr = nodeAt<TernaryExpr>(question);
@@ -582,6 +1348,21 @@ ExprPtr Parser::ternary() {
     expr->elseExpr = ternary();
     expr->condition = std::move(condition);
     return expr;
+}
+
+// a ?? b: a, unless it's null.
+ExprPtr Parser::nullish() {
+    ExprPtr left = logicOr();
+    while (check(TokenType::QuestionQuestion)) {
+        const Token& op = advance();
+        skipNewlines();
+        auto expr = nodeAt<LogicalExpr>(op);
+        expr->op = TokenType::QuestionQuestion;
+        expr->left = std::move(left);
+        expr->right = logicOr();
+        left = std::move(expr);
+    }
+    return left;
 }
 
 ExprPtr Parser::logicOr() {
@@ -643,8 +1424,22 @@ ExprPtr Parser::equality() {
 }
 
 ExprPtr Parser::comparison() {
-    return binary(&Parser::bitOr, {TokenType::Less, TokenType::LessEqual, TokenType::Greater,
+    return binary(&Parser::range, {TokenType::Less, TokenType::LessEqual, TokenType::Greater,
                                    TokenType::GreaterEqual, TokenType::In});
+}
+
+// 0..10 (10 not included) and 1..=10 (included). Binds looser than
+// arithmetic, so 0..n + 1 is 0..(n + 1).
+ExprPtr Parser::range() {
+    ExprPtr start = bitOr();
+    if (!check(TokenType::DotDot) && !check(TokenType::DotDotEqual)) return start;
+    const Token& op = advance();
+    skipNewlines();
+    auto expr = nodeAt<RangeExpr>(op);
+    expr->inclusive = op.type == TokenType::DotDotEqual;
+    expr->start = std::move(start);
+    expr->end = bitOr();
+    return expr;
 }
 
 // Bitwise operators bind tighter than comparisons (unlike C), so
@@ -687,6 +1482,38 @@ ExprPtr Parser::unary() {
         expr->operand = unary();
         return expr;
     }
+    if (check(TokenType::PlusPlus) || check(TokenType::MinusMinus)) {
+        const Token& op = advance();
+        NestingGuard guard(*this, op);
+        auto expr = nodeAt<IncDecExpr>(op);
+        expr->increment = op.type == TokenType::PlusPlus;
+        expr->prefix = true;
+        expr->target = unary();
+        if (!isAssignable(*expr->target)) {
+            error(op, "'" + op.lexeme + "' needs a variable, element or field to change");
+        }
+        return expr;
+    }
+    // A C-style cast: (i32) x, (f64) total / count. It binds like a unary operator.
+    if (check(TokenType::LeftParen) && peek(1).type == TokenType::Identifier && peek(2).type == TokenType::RightParen &&
+        startsOperand(peek(3).type)) {
+        TypeSpec type;
+        bool castable = lookupType(peek(1).lexeme, type) &&
+                        (type.kind == TypeKind::Number || type.kind == TypeKind::Bool || type.kind == TypeKind::Char ||
+                         type.kind == TypeKind::String);
+        if (castable) {
+            const Token& open = advance();
+            const Token& name = advance();
+            advance();
+            NestingGuard guard(*this, open);
+            auto callee = nodeAt<VariableExpr>(name);
+            callee->name = name.lexeme;
+            auto call = nodeAt<CallExpr>(open);
+            call->callee = std::move(callee);
+            call->args.push_back(unary());
+            return call;
+        }
+    }
     return power();
 }
 
@@ -720,21 +1547,93 @@ ExprPtr Parser::postfix() {
             member->object = std::move(expr);
             member->name = name.lexeme;
             expr = std::move(member);
+        } else if (check(TokenType::QuestionDot)) {
+            advance();
+            const Token& name = consume(TokenType::Identifier, "a field or method name after '?.'");
+            auto member = nodeAt<MemberExpr>(name);
+            member->object = std::move(expr);
+            member->name = name.lexeme;
+            member->optional = true;
+            expr = std::move(member);
+        } else if ((check(TokenType::PlusPlus) || check(TokenType::MinusMinus)) && isAssignable(*expr)) {
+            const Token& op = advance();
+            auto incdec = std::make_unique<IncDecExpr>(expr->line, expr->column);
+            incdec->increment = op.type == TokenType::PlusPlus;
+            incdec->target = std::move(expr);
+            return incdec;
         } else {
             return expr;
         }
     }
 }
 
+// Arguments: positional ones, then named ones (`size: 10`); `...items`
+// spreads a list into positional arguments.
 ExprPtr Parser::finishCall(ExprPtr callee) {
     auto call = std::make_unique<CallExpr>(callee->line, callee->column);
     call->callee = std::move(callee);
+    FlagGuard lambdas(noLambda_, false);
     while (!check(TokenType::RightParen)) {
-        call->args.push_back(expression());
+        if (check(TokenType::Identifier) && peek(1).type == TokenType::Colon) {
+            const Token& name = advance();
+            advance();
+            if (std::find(call->argNames.begin(), call->argNames.end(), name.lexeme) != call->argNames.end()) {
+                error(name, "the argument '" + name.lexeme + "' is given twice");
+            }
+            call->hasNamedArgs = true;
+            call->argNames.push_back(name.lexeme);
+            call->args.push_back(expression());
+        } else {
+            if (call->hasNamedArgs) error(peek(), "positional arguments must come before named ones");
+            call->argNames.emplace_back();
+            call->args.push_back(spreadOrExpression());
+        }
         if (!match(TokenType::Comma)) break;
     }
     consume(TokenType::RightParen, "')' after the arguments");
     return call;
+}
+
+ExprPtr Parser::spreadOrExpression() {
+    if (!check(TokenType::Ellipsis)) return expression();
+    const Token& dots = advance();
+    auto spread = nodeAt<SpreadExpr>(dots);
+    spread->value = expression();
+    return spread;
+}
+
+// The rest of [value for x in items if test] or {key: value for ...}.
+ExprPtr Parser::comprehension(const Token& open, ExprPtr key, ExprPtr value, TokenType closing) {
+    auto expr = nodeAt<ComprehensionExpr>(open);
+    expr->isMap = key != nullptr;
+    expr->key = std::move(key);
+    expr->value = std::move(value);
+    while (true) {
+        skipNewlines();
+        if (match(TokenType::For)) {
+            ComprehensionClause clause;
+            clause.first = consume(TokenType::Identifier, "a loop variable name after 'for'").lexeme;
+            if (match(TokenType::Comma)) {
+                clause.second = consume(TokenType::Identifier, "a second loop variable name after ','").lexeme;
+            }
+            if (!match(TokenType::In) && !match(TokenType::Colon)) {
+                error(peek(), "expected 'in' after the loop variable, found " + describeToken(peek()));
+            }
+            clause.expr = expression();
+            expr->clauses.push_back(std::move(clause));
+        } else if (match(TokenType::If)) {
+            ComprehensionClause clause;
+            clause.isFor = false;
+            clause.expr = expression();
+            expr->clauses.push_back(std::move(clause));
+        } else {
+            break;
+        }
+    }
+    skipNewlines();
+    consume(closing, closing == TokenType::RightBracket ? "']' to close the list comprehension"
+                                                         : "'}' to close the map comprehension");
+    return expr;
 }
 
 ExprPtr Parser::finishIndex(ExprPtr object, const Token& bracket) {
@@ -792,12 +1691,19 @@ ExprPtr Parser::primary() {
             return nodeAt<LiteralExpr>(token);
         }
         case TokenType::Identifier: {
+            if (!noLambda_ && peek(1).type == TokenType::FatArrow) return lambda(token, false);
             advance();
             auto variable = nodeAt<VariableExpr>(token);
             variable->name = token.lexeme;
             return variable;
         }
         case TokenType::LeftParen: {
+            if (!noLambda_) {
+                size_t close = matchingParen(current_);
+                if (close != std::string::npos && tokens_[close + 1].type == TokenType::FatArrow) {
+                    return lambda(token, true);
+                }
+            }
             advance();
             ExprPtr inner = expression();
             consume(TokenType::RightParen, "')' to close the '(' on line " + std::to_string(token.line));
@@ -823,8 +1729,13 @@ ExprPtr Parser::primary() {
 
 ExprPtr Parser::listLiteral(const Token& bracket) {
     auto list = nodeAt<ListExpr>(bracket);
+    FlagGuard lambdas(noLambda_, false);
     while (!check(TokenType::RightBracket)) {
-        list->elements.push_back(expression());
+        ExprPtr element = spreadOrExpression();
+        if (list->elements.empty() && check(TokenType::For) && element->kind != ExprKind::Spread) {
+            return comprehension(bracket, nullptr, std::move(element), TokenType::RightBracket);
+        }
+        list->elements.push_back(std::move(element));
         if (!match(TokenType::Comma)) break;
     }
     consume(TokenType::RightBracket, "']' to close the list that starts on line " + std::to_string(bracket.line));
@@ -837,9 +1748,18 @@ ExprPtr Parser::mapLiteral(const Token& brace) {
     auto map = nodeAt<MapExpr>(brace);
     skipNewlines();
     while (!check(TokenType::RightBrace)) {
+        if (check(TokenType::Ellipsis)) {  // {...defaults, size: 2}
+            map->entries.emplace_back(spreadOrExpression(), nullptr);
+            skipNewlines();
+            if (!match(TokenType::Comma)) break;
+            skipNewlines();
+            continue;
+        }
         ExprPtr key;
+        const Token* bareName = nullptr;
         if (check(TokenType::Identifier) && peek(1).type == TokenType::Colon) {
             const Token& name = advance();
+            bareName = &name;
             auto literal = nodeAt<LiteralExpr>(name);
             literal->value = Value::fromString(name.lexeme);
             key = std::move(literal);
@@ -850,6 +1770,15 @@ ExprPtr Parser::mapLiteral(const Token& brace) {
         consume(TokenType::Colon, "':' after the map key");
         skipNewlines();
         ExprPtr value = expression();
+        if (map->entries.empty() && peekPastNewlines().type == TokenType::For) {
+            // In {k: v for k, v in pairs}, a bare name is the loop variable, not a string key.
+            if (bareName != nullptr) {
+                auto variable = nodeAt<VariableExpr>(*bareName);
+                variable->name = bareName->lexeme;
+                key = std::move(variable);
+            }
+            return comprehension(brace, std::move(key), std::move(value), TokenType::RightBrace);
+        }
         map->entries.emplace_back(std::move(key), std::move(value));
         skipNewlines();
         if (!match(TokenType::Comma)) break;
