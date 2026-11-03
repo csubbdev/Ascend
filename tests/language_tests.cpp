@@ -601,7 +601,12 @@ TEST(lang_typed_collections) {
 }
 
 TEST(lang_deep_recursion_is_an_error) {
-    CHECK_ERROR("func forever(n) { return forever(n + 1) }\nforever(0)", "test.asc:1:26: runtime error:");
+    // Where the stack runs out depends on the machine, so only the error and
+    // the recursive call in the traceback are checked.
+    const char* program = "func forever(n) { return forever(n + 1) }\nforever(0)";
+    CHECK_ERROR(program, "runtime error:");
+    CHECK_ERROR(program, "  in forever(), called from test.asc:1:26\n    (and ");
+    CHECK_ERROR(program, "  in forever(), called from test.asc:2:1\n");
 }
 
 // ---------------------------------------------------------------------------
